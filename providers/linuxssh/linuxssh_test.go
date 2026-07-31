@@ -2,11 +2,44 @@ package linuxssh
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/LJAYi/komari-bridge/internal/config"
 	"github.com/LJAYi/komari-bridge/internal/model"
 )
+
+func TestCapabilityConstructors(t *testing.T) {
+	t.Parallel()
+	cfg := config.LinuxSSHConfig{ID: "host-a", User: "monitor", Password: "test-only", InsecureIgnoreHostKey: true}
+	agentless, err := NewAgentless(cfg, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentless.SourceType() != "agentless_ssh" || agentless.slurmOnly {
+		t.Fatalf("unexpected agentless mode: %#v", agentless)
+	}
+	scheduler, err := NewSlurm(cfg, time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduler.SourceType() != "slurm" || !scheduler.slurmOnly || !scheduler.cfg.EnableSlurm {
+		t.Fatalf("unexpected Slurm mode: %#v", scheduler)
+	}
+}
+
+func TestSlurmCollectorOmitsHostAndGPUCommands(t *testing.T) {
+	t.Parallel()
+	for _, unwanted := range []string{"nvidia-smi", "/proc/meminfo", "df"} {
+		if strings.Contains(slurmCollectorScript, unwanted) {
+			t.Fatalf("Slurm-only collector contains %q", unwanted)
+		}
+	}
+	if !strings.Contains(slurmCollectorScript, "sinfo") || !strings.Contains(slurmCollectorScript, "squeue") {
+		t.Fatal("Slurm-only collector is missing scheduler commands")
+	}
+}
 
 func TestCounterPercent(t *testing.T) {
 	t.Parallel()

@@ -18,9 +18,11 @@ import (
 )
 
 type Provider struct {
-	cfg       config.WindowsSSHConfig
-	timeout   time.Duration
-	sshConfig *ssh.ClientConfig
+	cfg        config.WindowsSSHConfig
+	timeout    time.Duration
+	sshConfig  *ssh.ClientConfig
+	sourceType string
+	emitHost   bool
 
 	mu           sync.Mutex
 	client       *ssh.Client
@@ -94,6 +96,18 @@ type wslData struct {
 }
 
 func New(cfg config.WindowsSSHConfig, timeout time.Duration) (*Provider, error) {
+	return newProvider(cfg, timeout, "windows_ssh", true)
+}
+
+// NewWSL creates a discovery-oriented provider. Windows host metrics belong to
+// the official Komari Agent; this provider emits only WSL child resources.
+func NewWSL(cfg config.WindowsSSHConfig, timeout time.Duration) (*Provider, error) {
+	cfg.DiscoverWSL = true
+	cfg.EnableNVIDIA = false
+	return newProvider(cfg, timeout, "windows_wsl", false)
+}
+
+func newProvider(cfg config.WindowsSSHConfig, timeout time.Duration, sourceType string, emitHost bool) (*Provider, error) {
 	auth, err := authMethods(cfg)
 	if err != nil {
 		return nil, err
@@ -109,7 +123,7 @@ func New(cfg config.WindowsSSHConfig, timeout time.Duration) (*Provider, error) 
 		}
 	}
 	return &Provider{
-		cfg: cfg, timeout: timeout,
+		cfg: cfg, timeout: timeout, sourceType: sourceType, emitHost: emitHost,
 		sshConfig:   &ssh.ClientConfig{User: cfg.User, Auth: auth, HostKeyCallback: hostKeyCallback, Timeout: timeout},
 		previousWSL: make(map[string]cpuCounters), previousWNet: make(map[string]networkCounters), previousWAt: make(map[string]time.Time),
 	}, nil
@@ -142,12 +156,12 @@ func authMethods(cfg config.WindowsSSHConfig) ([]ssh.AuthMethod, error) {
 }
 
 func (p *Provider) ID() string         { return p.cfg.ID }
-func (p *Provider) SourceType() string { return "windows_ssh" }
+func (p *Provider) SourceType() string { return p.sourceType }
 
 func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	output, err := p.run(ctx, collectorScript())
+	output, err := p.run(ctx, collectorScript(p.emitHost))
 	if err != nil {
 		p.closeLocked()
 		return nil, err
@@ -196,17 +210,20 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	if gpuSource != "windows" {
 		winTags["gpu_source"] = gpuSource
 	}
-	snapshots := []model.Snapshot{{
-		Identity: identity, Name: firstNonEmpty(p.cfg.Name, p.cfg.ID), Group: p.cfg.Group, ResourceType: resourceType,
-		Tags: winTags,
-		BasicInfo: model.BasicInfo{
-			CPUName: raw.Windows.CPUName, CPUCores: raw.Windows.CPUCores, CPUPhysicalCores: raw.Windows.CPUPhysicalCores,
-			Arch: raw.Windows.Arch, OS: raw.Windows.OS, KernelVersion: raw.Windows.Kernel,
-			MemoryTotal: raw.Windows.MemoryTotal, DiskTotal: raw.Windows.DiskTotal, GPUName: formatGPUName(windowsGPUs),
-			Virtualization: "qemu", Version: "komari-bridge/windows-ssh",
-		},
-		Report: winReport, CollectedAt: now, Online: true, Priority: 100,
-	}}
+	var snapshots []model.Snapshot
+	if p.emitHost {
+		snapshots = append(snapshots, model.Snapshot{
+			Identity: identity, Name: firstNonEmpty(p.cfg.Name, p.cfg.ID), Group: p.cfg.Group, ResourceType: resourceType,
+			Tags: winTags,
+			BasicInfo: model.BasicInfo{
+				CPUName: raw.Windows.CPUName, CPUCores: raw.Windows.CPUCores, CPUPhysicalCores: raw.Windows.CPUPhysicalCores,
+				Arch: raw.Windows.Arch, OS: raw.Windows.OS, KernelVersion: raw.Windows.Kernel,
+				MemoryTotal: raw.Windows.MemoryTotal, DiskTotal: raw.Windows.DiskTotal, GPUName: formatGPUName(windowsGPUs),
+				Version: "komari-bridge/windows-ssh",
+			},
+			Report: winReport, CollectedAt: now, Online: true, Priority: 100,
+		})
+	}
 	if p.cfg.DiscoverWSL {
 		for _, distro := range raw.WSL {
 			snapshots = append(snapshots, p.wslSnapshot(distro, now))
@@ -230,11 +247,17 @@ func (p *Provider) wslSnapshot(raw wslReport, now time.Time) model.Snapshot {
 	if alias := p.cfg.WSLNames[raw.Name]; alias != "" {
 		name = alias
 	}
+	metricsSource := "windows_wsl"
+	version := "komari-bridge/windows-wsl"
+	if p.emitHost {
+		metricsSource = "windows_ssh_wsl"
+		version = "komari-bridge/windows-ssh"
+	}
 	snapshot := model.Snapshot{
 		Identity: model.Identity{SourceType: p.SourceType(), SourceID: p.cfg.ID, ExternalID: "wsl:" + strings.ToLower(raw.GUID)},
 		Name:     name, Group: p.cfg.Group, ResourceType: "wsl", Online: raw.Online && raw.Data != nil, CollectedAt: now, Priority: 100,
-		Tags:      map[string]string{"metrics_source": "windows_ssh_wsl", "distribution": raw.Name, "wsl_version": fmt.Sprint(raw.Version)},
-		BasicInfo: model.BasicInfo{OS: fmt.Sprintf("WSL%d %s", raw.Version, raw.Name), Virtualization: "wsl", Version: "komari-bridge/windows-ssh"},
+		Tags:      map[string]string{"metrics_source": metricsSource, "distribution": raw.Name, "wsl_version": fmt.Sprint(raw.Version)},
+		BasicInfo: model.BasicInfo{OS: fmt.Sprintf("WSL%d %s", raw.Version, raw.Name), Virtualization: "wsl", Version: version},
 	}
 	if p.cfg.AttachTo.ExternalID != "" {
 		snapshot.ParentExternalID = p.cfg.AttachTo.ExternalID
@@ -254,7 +277,7 @@ func (p *Provider) wslSnapshot(raw wslReport, now time.Time) model.Snapshot {
 		CPUName: data.CPUName, CPUCores: data.CPUCores, CPUPhysicalCores: data.CPUPhysicalCores,
 		Arch: data.Arch, OS: data.OS, KernelVersion: data.Kernel,
 		MemoryTotal: memTotal, SwapTotal: swapTotal, DiskTotal: data.DiskTotal,
-		GPUName: formatGPUName(data.GPUs), Virtualization: "wsl", Version: "komari-bridge/windows-ssh",
+		GPUName: formatGPUName(data.GPUs), Virtualization: "wsl", Version: version,
 	}
 	snapshot.Report = model.Report{
 		CPU:     model.CPUReport{Name: data.CPUName, Cores: data.CPUCores, Arch: data.Arch, Usage: cpuUsage},

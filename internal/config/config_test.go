@@ -55,3 +55,65 @@ scheduler:
 		t.Fatalf("Load() error = %v", err)
 	}
 }
+
+func TestLoadsCapabilityOrientedProviders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: 123456789012
+providers:
+  agentless_ssh:
+    - id: appliance-a
+      address: appliance-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+  slurm:
+    - id: cluster-a
+      address: cluster-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+  windows_wsl:
+    - id: workstation-a
+      address: workstation-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers.AgentlessSSH) != 1 || len(cfg.Providers.Slurm) != 1 || len(cfg.Providers.WindowsWSL) != 1 {
+		t.Fatalf("unexpected providers: %#v", cfg.Providers)
+	}
+}
+
+func TestAgentlessSSHRejectsEmbeddedSlurm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: 123456789012
+providers:
+  agentless_ssh:
+    - id: appliance-a
+      address: appliance-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+      enable_slurm: true
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "providers.slurm") {
+		t.Fatalf("Load() error = %v", err)
+	}
+}

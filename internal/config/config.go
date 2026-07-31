@@ -48,7 +48,13 @@ type SchedulerConfig struct {
 }
 
 type ProvidersConfig struct {
-	Proxmox    []ProxmoxConfig    `yaml:"proxmox"`
+	Proxmox      []ProxmoxConfig    `yaml:"proxmox"`
+	AgentlessSSH []LinuxSSHConfig   `yaml:"agentless_ssh"`
+	Slurm        []LinuxSSHConfig   `yaml:"slurm"`
+	WindowsWSL   []WindowsSSHConfig `yaml:"windows_wsl"`
+
+	// LinuxSSH and WindowsSSH are legacy compatibility keys. New deployments
+	// should use the capability-oriented provider names above.
 	LinuxSSH   []LinuxSSHConfig   `yaml:"linux_ssh"`
 	WindowsSSH []WindowsSSHConfig `yaml:"windows_ssh"`
 }
@@ -160,35 +166,60 @@ func validate(cfg Config) error {
 			}
 		}
 	}
-	for i, p := range cfg.Providers.LinuxSSH {
-		if p.ID == "" || p.Address == "" || p.User == "" {
-			return fmt.Errorf("providers.linux_ssh[%d]: id, address and user are required", i)
-		}
-		if p.PrivateKeyPath == "" && p.PrivateKey == "" && p.Password == "" {
-			return fmt.Errorf("providers.linux_ssh[%d]: an SSH credential is required", i)
-		}
-		if !p.InsecureIgnoreHostKey && p.HostKey == "" {
-			return fmt.Errorf("providers.linux_ssh[%d]: host_key is required unless insecure_ignore_host_key is true", i)
-		}
-		attached := p.AttachTo.SourceType != "" || p.AttachTo.SourceID != "" || p.AttachTo.ExternalID != ""
-		if attached && (p.AttachTo.SourceType == "" || p.AttachTo.SourceID == "" || p.AttachTo.ExternalID == "") {
-			return fmt.Errorf("providers.linux_ssh[%d]: attach_to requires source_type, source_id and external_id", i)
+	linuxProviders := []struct {
+		path string
+		list []LinuxSSHConfig
+	}{
+		{"agentless_ssh", cfg.Providers.AgentlessSSH},
+		{"slurm", cfg.Providers.Slurm},
+		{"linux_ssh", cfg.Providers.LinuxSSH},
+	}
+	for _, provider := range linuxProviders {
+		for i, p := range provider.list {
+			if err := validateSSH(provider.path, i, p.ID, p.Address, p.User, p.PrivateKeyPath, p.PrivateKey, p.Password, p.HostKey, p.InsecureIgnoreHostKey, p.AttachTo); err != nil {
+				return err
+			}
+			if provider.path == "agentless_ssh" && p.EnableSlurm {
+				return fmt.Errorf("providers.agentless_ssh[%d]: configure Slurm under providers.slurm instead", i)
+			}
+			if provider.path == "slurm" && (p.EnableNVIDIA || p.AttachTo.SourceType != "") {
+				return fmt.Errorf("providers.slurm[%d]: enable_nvidia and attach_to are host-report options; use Komari Agent for host metrics", i)
+			}
 		}
 	}
-	for i, p := range cfg.Providers.WindowsSSH {
-		if p.ID == "" || p.Address == "" || p.User == "" {
-			return fmt.Errorf("providers.windows_ssh[%d]: id, address and user are required", i)
+	windowsProviders := []struct {
+		path string
+		list []WindowsSSHConfig
+	}{
+		{"windows_wsl", cfg.Providers.WindowsWSL},
+		{"windows_ssh", cfg.Providers.WindowsSSH},
+	}
+	for _, provider := range windowsProviders {
+		for i, p := range provider.list {
+			if err := validateSSH(provider.path, i, p.ID, p.Address, p.User, p.PrivateKeyPath, p.PrivateKey, p.Password, p.HostKey, p.InsecureIgnoreHostKey, p.AttachTo); err != nil {
+				return err
+			}
+			if provider.path == "windows_wsl" && p.EnableNVIDIA {
+				return fmt.Errorf("providers.windows_wsl[%d]: Windows and GPU host metrics belong to Komari Agent", i)
+			}
 		}
-		if p.PrivateKeyPath == "" && p.PrivateKey == "" && p.Password == "" {
-			return fmt.Errorf("providers.windows_ssh[%d]: an SSH credential is required", i)
-		}
-		if !p.InsecureIgnoreHostKey && p.HostKey == "" {
-			return fmt.Errorf("providers.windows_ssh[%d]: host_key is required unless insecure_ignore_host_key is true", i)
-		}
-		attached := p.AttachTo.SourceType != "" || p.AttachTo.SourceID != "" || p.AttachTo.ExternalID != ""
-		if attached && (p.AttachTo.SourceType == "" || p.AttachTo.SourceID == "" || p.AttachTo.ExternalID == "") {
-			return fmt.Errorf("providers.windows_ssh[%d]: attach_to requires source_type, source_id and external_id", i)
-		}
+	}
+	return nil
+}
+
+func validateSSH(path string, index int, id, address, user, privateKeyPath, privateKey, password, hostKey string, insecure bool, attach ResourceIdentity) error {
+	if id == "" || address == "" || user == "" {
+		return fmt.Errorf("providers.%s[%d]: id, address and user are required", path, index)
+	}
+	if privateKeyPath == "" && privateKey == "" && password == "" {
+		return fmt.Errorf("providers.%s[%d]: an SSH credential is required", path, index)
+	}
+	if !insecure && hostKey == "" {
+		return fmt.Errorf("providers.%s[%d]: host_key is required unless insecure_ignore_host_key is true", path, index)
+	}
+	attached := attach.SourceType != "" || attach.SourceID != "" || attach.ExternalID != ""
+	if attached && (attach.SourceType == "" || attach.SourceID == "" || attach.ExternalID == "") {
+		return fmt.Errorf("providers.%s[%d]: attach_to requires source_type, source_id and external_id", path, index)
 	}
 	return nil
 }

@@ -12,7 +12,7 @@ func TestMergeSnapshotsUsesGuestMetricsAndKeepsTopology(t *testing.T) {
 	pve := model.Snapshot{
 		Identity: identity, Name: "gpu-a", Group: "Lab A", ResourceType: "qemu",
 		ParentExternalID: "node:pve-a", Tags: map[string]string{"node": "pve-a"},
-		BasicInfo: model.BasicInfo{OS: "Ubuntu", MemoryTotal: 108},
+		BasicInfo: model.BasicInfo{OS: "Ubuntu", MemoryTotal: 108, Virtualization: "qemu"},
 		Report:    model.Report{RAM: model.Usage{Total: 108, Used: 106}},
 		Priority:  10,
 	}
@@ -29,6 +29,9 @@ func TestMergeSnapshotsUsesGuestMetricsAndKeepsTopology(t *testing.T) {
 	}
 	if got.BasicInfo.CPUName != "Example CPU" || got.Report.RAM.Used != 7 || got.Report.GPU == nil || got.Report.GPU.Count != 4 {
 		t.Fatalf("guest metrics were not selected: %#v", got)
+	}
+	if got.BasicInfo.Virtualization != "qemu" {
+		t.Fatalf("discovered virtualization was not preserved: %#v", got.BasicInfo)
 	}
 	if got.Tags["node"] != "pve-a" || got.Tags["metrics_source"] != "ssh" {
 		t.Fatalf("tags were not merged: %#v", got.Tags)

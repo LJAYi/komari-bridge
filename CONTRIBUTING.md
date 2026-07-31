@@ -2,6 +2,12 @@
 
 Thank you for contributing to `komari-bridge`.
 
+Before proposing a provider, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+komari-bridge complements Komari Agent and does not accept new general-purpose
+host, GPU, terminal, or task collectors. Providers should focus on resource
+discovery, topology, appliances that cannot run an Agent, or domain extensions
+such as Slurm.
+
 ## Before opening a change
 
 1. Keep collectors read-only and use fixed embedded commands.

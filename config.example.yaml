@@ -36,7 +36,9 @@ providers:
           # QEMU process memory observed by PVE.
           guest_memory: qga
 
-  linux_ssh:
+  # Optional fallback for systems where Komari Agent cannot be installed.
+  # Do not use this as the default host collector.
+  agentless_ssh:
     - id: gpu-a
       address: gpu-a.example.internal:22
       user: monitor
@@ -45,14 +47,24 @@ providers:
       name: gpu-a
       group: Lab A
       enable_nvidia: true
-      enable_slurm: true
       # Merge guest metrics into the PVE-discovered VM.
       attach_to:
         source_type: proxmox
         source_id: site-a
         external_id: qemu:105
 
-  windows_ssh:
+  # Slurm is extension-only: it updates /api/v1/slurm and does not register a
+  # second Komari host client. The official Agent should report host metrics.
+  slurm:
+    - id: gpu-a
+      address: gpu-a.example.internal:22
+      user: monitor
+      private_key_path: /run/secrets/gpu_a_ssh_key
+      host_key: SHA256:replace-with-the-real-host-key-fingerprint
+
+  # Discovers WSL children without replacing Windows host metrics. Install the
+  # official Agent on Windows when possible.
+  windows_wsl:
     - id: workstation-a
       address: workstation-a.example.internal:22
       # This must be the Windows user that owns the WSL registrations.
@@ -61,8 +73,6 @@ providers:
       host_key: SHA256:replace-with-the-real-host-key-fingerprint
       name: workstation-a
       group: Lab A
-      enable_nvidia: true
-      discover_wsl: true
       wsl_names:
         Ubuntu: wsl-a
       attach_to:

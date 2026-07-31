@@ -79,7 +79,9 @@ func main() {
 }
 
 func buildProviders(cfg config.Config, slurmStore *slurm.Store) ([]provider.Provider, error) {
-	providers := make([]provider.Provider, 0, len(cfg.Providers.Proxmox)+len(cfg.Providers.LinuxSSH)+len(cfg.Providers.WindowsSSH))
+	providerCount := len(cfg.Providers.Proxmox) + len(cfg.Providers.AgentlessSSH) + len(cfg.Providers.Slurm) +
+		len(cfg.Providers.WindowsWSL) + len(cfg.Providers.LinuxSSH) + len(cfg.Providers.WindowsSSH)
+	providers := make([]provider.Provider, 0, providerCount)
 	for _, pveCfg := range cfg.Providers.Proxmox {
 		p, err := proxmox.New(pveCfg, cfg.Komari.Timeout.Duration)
 		if err != nil {
@@ -87,6 +89,29 @@ func buildProviders(cfg config.Config, slurmStore *slurm.Store) ([]provider.Prov
 		}
 		providers = append(providers, p)
 	}
+	for _, sshCfg := range cfg.Providers.AgentlessSSH {
+		p, err := linuxssh.NewAgentless(sshCfg, cfg.Komari.Timeout.Duration)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	for _, sshCfg := range cfg.Providers.Slurm {
+		p, err := linuxssh.NewSlurm(sshCfg, cfg.Komari.Timeout.Duration, slurmStore)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	for _, sshCfg := range cfg.Providers.WindowsWSL {
+		p, err := windowsssh.NewWSL(sshCfg, cfg.Komari.Timeout.Duration)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	// Deprecated provider names retain their original source identities so an
+	// upgrade cannot register duplicate Komari clients in existing deployments.
 	for _, sshCfg := range cfg.Providers.LinuxSSH {
 		p, err := linuxssh.New(sshCfg, cfg.Komari.Timeout.Duration, slurmStore)
 		if err != nil {

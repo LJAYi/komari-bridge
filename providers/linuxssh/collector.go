@@ -203,3 +203,70 @@ print(json.dumps({
     "slurm": slurm_info(),
 }, separators=(",", ":")))
 `
+
+// slurmCollectorScript intentionally omits generic host and GPU collection.
+// Host metrics remain owned by Komari Agent when the Slurm provider is used.
+const slurmCollectorScript = `
+import json
+import re
+import subprocess
+
+def command(args, timeout=8):
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=timeout).strip()
+    except Exception:
+        return ""
+
+def service_active(name):
+    return command(["systemctl", "is-active", name]) == "active"
+
+def slurm_info():
+    output = command(["sinfo", "--noheader", "-o", "%P|%a|%D|%T|%C|%G"])
+    if not output:
+        return {"available": False}
+    partitions = []
+    for line in output.splitlines():
+        fields = line.split("|", 5)
+        if len(fields) != 6:
+            continue
+        try:
+            nodes = int(fields[2])
+        except ValueError:
+            nodes = 0
+        partitions.append({
+            "name": fields[0].rstrip("*"), "availability": fields[1],
+            "nodes": nodes, "state": fields[3], "cpus": fields[4], "gres": fields[5],
+        })
+    jobs = []
+    queue = command(["squeue", "--noheader", "-o", "%i|%P|%u|%T|%M|%D|%R|%b"])
+    for line in queue.splitlines():
+        fields = line.split("|", 7)
+        if len(fields) != 8:
+            continue
+        try:
+            nodes = int(fields[5])
+        except ValueError:
+            nodes = 0
+        jobs.append({
+            "id": fields[0], "partition": fields[1], "user": fields[2],
+            "state": fields[3], "elapsed": fields[4], "nodes": nodes,
+            "reason": fields[6], "gres": fields[7],
+        })
+    configured = allocated = 0
+    for line in command(["scontrol", "show", "node", "-o"]).splitlines():
+        configured_match = re.search(r"CfgTRES=.*?gres/gpu=(\d+)", line)
+        allocated_match = re.search(r"AllocTRES=.*?gres/gpu=(\d+)", line)
+        if configured_match:
+            configured += int(configured_match.group(1))
+        if allocated_match:
+            allocated += int(allocated_match.group(1))
+    return {
+        "available": True,
+        "controller_up": service_active("slurmctld"),
+        "node_daemon_up": service_active("slurmd"),
+        "partitions": partitions, "jobs": jobs,
+        "gpus_configured": configured, "gpus_allocated": allocated,
+    }
+
+print(json.dumps({"slurm": slurm_info()}, separators=(",", ":")))
+`

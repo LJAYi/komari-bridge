@@ -85,7 +85,13 @@ func mergeSnapshots(a, b model.Snapshot) model.Snapshot {
 	// Whole guest-side metric/basic-info payloads replace hypervisor
 	// observations. Discovery metadata remains canonical unless enrichment
 	// explicitly supplies a value.
-	base.BasicInfo = enrichment.BasicInfo
+	// Guest-side collectors must not invent a virtualization platform. Preserve
+	// authoritative discovery metadata when enrichment leaves it unknown.
+	basicInfo := enrichment.BasicInfo
+	if basicInfo.Virtualization == "" {
+		basicInfo.Virtualization = base.BasicInfo.Virtualization
+	}
+	base.BasicInfo = basicInfo
 	base.Report = enrichment.Report
 	base.Online = enrichment.Online
 	base.CollectedAt = enrichment.CollectedAt

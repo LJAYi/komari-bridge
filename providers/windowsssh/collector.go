@@ -6,9 +6,10 @@ import (
 	"unicode/utf16"
 )
 
-func collectorScript() string {
+func collectorScript(includeWindows bool) string {
 	wslPayload := base64.StdEncoding.EncodeToString([]byte(wslCollectorPython))
-	return strings.ReplaceAll(windowsCollectorPowerShell, "__WSL_PAYLOAD__", wslPayload)
+	script := strings.ReplaceAll(windowsCollectorPowerShell, "__WSL_PAYLOAD__", wslPayload)
+	return strings.ReplaceAll(script, "__COLLECT_WINDOWS__", map[bool]string{true: "$true", false: "$false"}[includeWindows])
 }
 
 func collectorBootstrapCommand() string {
@@ -61,27 +62,41 @@ function Get-NvidiaGpu {
     return @($result)
 }
 
-$processors = @(Get-CimInstance Win32_Processor)
-$operatingSystem = Get-CimInstance Win32_OperatingSystem
-$logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")
-$diskTotal = [int64](($logicalDisks | Measure-Object -Property Size -Sum).Sum)
-$diskFree = [int64](($logicalDisks | Measure-Object -Property FreeSpace -Sum).Sum)
+$cpuName = ""
+$cpuLogical = 0
+$cpuPhysical = 0
+$operatingSystem = $null
+$diskTotal = [int64]0
+$diskFree = [int64]0
 $netUp = [int64]0
 $netDown = [int64]0
-try {
-    $statistics = @(Get-NetAdapterStatistics -ErrorAction Stop)
-    $netUp = [int64](($statistics | Measure-Object -Property SentBytes -Sum).Sum)
-    $netDown = [int64](($statistics | Measure-Object -Property ReceivedBytes -Sum).Sum)
-} catch {}
-$cpuUsage = [double](($processors | Measure-Object -Property LoadPercentage -Average).Average)
-$cpuName = if ($processors.Count -gt 0) { [string]$processors[0].Name } else { "" }
-$cpuLogical = [int](($processors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum)
-$cpuPhysical = [int](($processors | Measure-Object -Property NumberOfCores -Sum).Sum)
-$memoryTotal = [int64]$operatingSystem.TotalVisibleMemorySize * 1KB
-$memoryFree = [int64]$operatingSystem.FreePhysicalMemory * 1KB
-$uptime = [int64]((Get-Date) - $operatingSystem.LastBootUpTime).TotalSeconds
-$processes = @(Get-Process).Count
-$windowsGpus = @(Get-NvidiaGpu)
+$cpuUsage = [double]0
+$memoryTotal = [int64]0
+$memoryFree = [int64]0
+$uptime = [int64]0
+$processes = 0
+$windowsGpus = @()
+if (__COLLECT_WINDOWS__) {
+    $processors = @(Get-CimInstance Win32_Processor)
+    $operatingSystem = Get-CimInstance Win32_OperatingSystem
+    $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")
+    $diskTotal = [int64](($logicalDisks | Measure-Object -Property Size -Sum).Sum)
+    $diskFree = [int64](($logicalDisks | Measure-Object -Property FreeSpace -Sum).Sum)
+    try {
+        $statistics = @(Get-NetAdapterStatistics -ErrorAction Stop)
+        $netUp = [int64](($statistics | Measure-Object -Property SentBytes -Sum).Sum)
+        $netDown = [int64](($statistics | Measure-Object -Property ReceivedBytes -Sum).Sum)
+    } catch {}
+    $cpuUsage = [double](($processors | Measure-Object -Property LoadPercentage -Average).Average)
+    $cpuName = if ($processors.Count -gt 0) { [string]$processors[0].Name } else { "" }
+    $cpuLogical = [int](($processors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum)
+    $cpuPhysical = [int](($processors | Measure-Object -Property NumberOfCores -Sum).Sum)
+    $memoryTotal = [int64]$operatingSystem.TotalVisibleMemorySize * 1KB
+    $memoryFree = [int64]$operatingSystem.FreePhysicalMemory * 1KB
+    $uptime = [int64]((Get-Date) - $operatingSystem.LastBootUpTime).TotalSeconds
+    $processes = @(Get-Process).Count
+    $windowsGpus = @(Get-NvidiaGpu)
+}
 
 $running = @()
 try {
@@ -123,8 +138,8 @@ try {
         cpu_cores = $cpuLogical
         cpu_physical_cores = $cpuPhysical
         arch = $env:PROCESSOR_ARCHITECTURE
-        os = [string]$operatingSystem.Caption
-        kernel = [string]$operatingSystem.Version
+        os = if ($operatingSystem) { [string]$operatingSystem.Caption } else { "" }
+        kernel = if ($operatingSystem) { [string]$operatingSystem.Version } else { "" }
         cpu_usage = $cpuUsage
         memory_total = $memoryTotal
         memory_free = $memoryFree

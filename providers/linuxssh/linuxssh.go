@@ -22,6 +22,8 @@ type Provider struct {
 	timeout    time.Duration
 	sshConfig  *ssh.ClientConfig
 	slurmStore *slurm.Store
+	sourceType string
+	slurmOnly  bool
 
 	mu          sync.Mutex
 	client      *ssh.Client
@@ -35,6 +37,24 @@ type cpuCounters struct{ Total, Idle uint64 }
 type networkCounters struct{ Up, Down uint64 }
 
 func New(cfg config.LinuxSSHConfig, timeout time.Duration, slurmStore *slurm.Store) (*Provider, error) {
+	return newProvider(cfg, timeout, slurmStore, "linux_ssh", false)
+}
+
+// NewAgentless creates the optional host-metrics fallback. The official
+// Komari Agent remains preferred whenever software can run on the target OS.
+func NewAgentless(cfg config.LinuxSSHConfig, timeout time.Duration) (*Provider, error) {
+	return newProvider(cfg, timeout, nil, "agentless_ssh", false)
+}
+
+// NewSlurm creates an extension-only provider. It updates the Slurm API store
+// but deliberately does not register or report a Komari host client.
+func NewSlurm(cfg config.LinuxSSHConfig, timeout time.Duration, slurmStore *slurm.Store) (*Provider, error) {
+	cfg.EnableSlurm = true
+	cfg.EnableNVIDIA = false
+	return newProvider(cfg, timeout, slurmStore, "slurm", true)
+}
+
+func newProvider(cfg config.LinuxSSHConfig, timeout time.Duration, slurmStore *slurm.Store, sourceType string, slurmOnly bool) (*Provider, error) {
 	auth, err := authMethods(cfg)
 	if err != nil {
 		return nil, err
@@ -50,7 +70,7 @@ func New(cfg config.LinuxSSHConfig, timeout time.Duration, slurmStore *slurm.Sto
 		}
 	}
 	return &Provider{
-		cfg: cfg, timeout: timeout, slurmStore: slurmStore,
+		cfg: cfg, timeout: timeout, slurmStore: slurmStore, sourceType: sourceType, slurmOnly: slurmOnly,
 		sshConfig: &ssh.ClientConfig{
 			User: cfg.User, Auth: auth, HostKeyCallback: hostKeyCallback, Timeout: timeout,
 		},
@@ -84,7 +104,7 @@ func authMethods(cfg config.LinuxSSHConfig) ([]ssh.AuthMethod, error) {
 }
 
 func (p *Provider) ID() string         { return p.cfg.ID }
-func (p *Provider) SourceType() string { return "linux_ssh" }
+func (p *Provider) SourceType() string { return p.sourceType }
 
 type remoteReport struct {
 	CPUName          string            `json:"cpu_name"`
@@ -120,7 +140,11 @@ type remoteSlurm struct {
 func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	output, err := p.run(ctx, collectorScript)
+	script := collectorScript
+	if p.slurmOnly {
+		script = slurmCollectorScript
+	}
+	output, err := p.run(ctx, script)
 	if err != nil {
 		p.closeLocked()
 		return nil, err
@@ -191,16 +215,19 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		p.slurmStore.Set(p.cfg.ID, snapshot)
 		report.Message = fmt.Sprintf("Slurm: %d running, %d pending; GPUs %d/%d allocated", snapshot.JobsRunning, snapshot.JobsPending, snapshot.GPUsAllocated, snapshot.GPUsConfigured)
 	}
+	if p.slurmOnly {
+		return nil, nil
+	}
 	name := firstNonEmpty(p.cfg.Name, p.cfg.ID)
 	return []model.Snapshot{{
 		Identity: identity, Name: name, Group: p.cfg.Group, ResourceType: resourceType,
-		Tags: map[string]string{"metrics_source": "ssh"},
+		Tags: map[string]string{"metrics_source": p.SourceType()},
 		BasicInfo: model.BasicInfo{
 			CPUName: raw.CPUName, CPUCores: raw.CPUCores, CPUPhysicalCores: raw.CPUPhysicalCores,
 			Arch: raw.Arch, OS: osName, KernelVersion: raw.Kernel,
 			MemoryTotal: memTotal, SwapTotal: swapTotal, DiskTotal: raw.DiskTotal,
-			GPUName:        formatGPUName(raw.GPUs),
-			Virtualization: "qemu", Version: "komari-bridge/ssh",
+			GPUName: formatGPUName(raw.GPUs),
+			Version: "komari-bridge/agentless-ssh",
 		},
 		Report: report, CollectedAt: now, Online: true, Priority: 100,
 	}}, nil

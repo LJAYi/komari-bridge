@@ -3,7 +3,22 @@ package windowsssh
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/LJAYi/komari-bridge/internal/config"
 )
+
+func TestWSLConstructorDoesNotEmitWindowsHost(t *testing.T) {
+	t.Parallel()
+	cfg := config.WindowsSSHConfig{ID: "workstation-a", User: "monitor", Password: "test-only", InsecureIgnoreHostKey: true}
+	provider, err := NewWSL(cfg, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.SourceType() != "windows_wsl" || provider.emitHost || !provider.cfg.DiscoverWSL || provider.cfg.EnableNVIDIA {
+		t.Fatalf("unexpected WSL mode: %#v", provider)
+	}
+}
 
 func TestDecodeCollectorOutputIgnoresPowerShellCLIXML(t *testing.T) {
 	t.Parallel()
@@ -31,7 +46,10 @@ func TestCollectorUsesShortEncodedBootstrap(t *testing.T) {
 	if len(command) > 2048 {
 		t.Fatalf("collector bootstrap is unexpectedly large: %d bytes", len(command))
 	}
-	if !strings.Contains(collectorScript(), "python3 -") {
+	if !strings.Contains(collectorScript(true), "python3 -") {
 		t.Fatal("collector script does not contain the WSL inner collector")
+	}
+	if !strings.Contains(collectorScript(false), "if ($false)") {
+		t.Fatal("WSL-only collector does not disable Windows host collection")
 	}
 }

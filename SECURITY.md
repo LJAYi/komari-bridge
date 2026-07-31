@@ -15,6 +15,8 @@ authentication bypass, command-injection path, or privilege-escalation issue.
   tokens.
 - Do not expose the extension API without authentication and transport
   security.
+- Treat Slurm usernames, job identifiers, queue state, and scheduling reasons
+  as operationally sensitive.
 - Scope `VM.GuestAgent.Unrestricted` only to VMs configured for QGA guest
   memory collection.
 
