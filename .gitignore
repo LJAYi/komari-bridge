@@ -1,0 +1,13 @@
+/bin/
+/data/
+/config*.yaml
+!/config.example.yaml
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.key
+*.pem
+coverage.out
+.DS_Store

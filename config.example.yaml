@@ -1,0 +1,71 @@
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: ${KOMARI_AUTODISCOVERY_KEY}
+  timeout: 15s
+
+database:
+  path: ./data/komari-bridge.db
+
+http:
+  # Keep this private or place it behind an authenticated reverse proxy.
+  listen: 127.0.0.1:9090
+  api_key: ${BRIDGE_API_KEY}
+
+scheduler:
+  # Komari marks an HTTP-reporting client offline after 35 seconds.
+  interval: 20s
+
+providers:
+  proxmox:
+    - id: site-a
+      endpoint: https://pve.example.internal:8006
+      token_id: komari-bridge@pve!monitor
+      token_secret: ${PVE_SITE_A_TOKEN}
+      group: Lab A
+      insecure_skip_verify: false
+      skip_stopped: true
+      names:
+        "node:pve-a": pve-a
+        "qemu:100": nas-a
+        "qemu:101": router-a
+        "qemu:105": gpu-a
+      resources:
+        "qemu:100":
+          os: NAS appliance
+          # Use MemTotal - MemAvailable from a running Linux guest instead of
+          # QEMU process memory observed by PVE.
+          guest_memory: qga
+
+  linux_ssh:
+    - id: gpu-a
+      address: gpu-a.example.internal:22
+      user: monitor
+      private_key_path: /run/secrets/gpu_a_ssh_key
+      host_key: SHA256:replace-with-the-real-host-key-fingerprint
+      name: gpu-a
+      group: Lab A
+      enable_nvidia: true
+      enable_slurm: true
+      # Merge guest metrics into the PVE-discovered VM.
+      attach_to:
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:105
+
+  windows_ssh:
+    - id: workstation-a
+      address: workstation-a.example.internal:22
+      # This must be the Windows user that owns the WSL registrations.
+      user: monitor
+      private_key_path: /run/secrets/workstation_a_ssh_key
+      host_key: SHA256:replace-with-the-real-host-key-fingerprint
+      name: workstation-a
+      group: Lab A
+      enable_nvidia: true
+      discover_wsl: true
+      wsl_names:
+        Ubuntu: wsl-a
+      attach_to:
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:107
