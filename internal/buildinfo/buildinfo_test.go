@@ -36,4 +36,15 @@ func TestClientVersion(t *testing.T) {
 	if got, want := ClientVersion(""), "komari-bridge v0.2.0-dev"; got != want {
 		t.Fatalf("ClientVersion() without build metadata = %q, want %q", got, want)
 	}
+
+	Commit = "bf27876"
+	for collector, want := range map[string]string{
+		"linux_ssh":       "komari-bridge v0.2.0-dev (bf27876) / agentless-ssh",
+		"windows_wsl":     "komari-bridge v0.2.0-dev (bf27876) / windows-wsl",
+		"windows_ssh_wsl": "komari-bridge v0.2.0-dev (bf27876) / windows-wsl",
+	} {
+		if got := ClientVersion(collector); got != want {
+			t.Errorf("ClientVersion(%q) = %q, want %q", collector, got, want)
+		}
+	}
 }

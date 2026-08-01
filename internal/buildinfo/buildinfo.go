@@ -32,10 +32,22 @@ func ClientVersion(collector string) string {
 	if commit := shortCommit(Commit); commit != "" {
 		result += " (" + commit + ")"
 	}
-	if collector = strings.TrimSpace(strings.ReplaceAll(collector, "_", "-")); collector != "" {
+	if collector = collectorName(collector); collector != "" {
 		result += " / " + collector
 	}
 	return result
+}
+
+func collectorName(collector string) string {
+	collector = strings.TrimSpace(strings.ReplaceAll(collector, "_", "-"))
+	switch collector {
+	case "linux-ssh":
+		return "agentless-ssh"
+	case "windows-wsl", "windows-ssh-wsl":
+		return "windows-wsl"
+	default:
+		return collector
+	}
 }
 
 func shortCommit(commit string) string {
