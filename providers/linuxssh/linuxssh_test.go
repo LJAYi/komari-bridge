@@ -8,6 +8,7 @@ import (
 
 	"github.com/LJAYi/komari-bridge/internal/config"
 	"github.com/LJAYi/komari-bridge/internal/model"
+	"github.com/LJAYi/komari-bridge/internal/slurm"
 )
 
 func TestCapabilityConstructors(t *testing.T) {
@@ -95,5 +96,71 @@ func TestFormatGPUName(t *testing.T) {
 	})
 	if got != "Example GPU × 4" {
 		t.Fatalf("formatGPUName() = %q", got)
+	}
+}
+
+func TestValidateRemoteReportRejectsDegradedHostData(t *testing.T) {
+	t.Parallel()
+	valid := remoteReport{
+		CPUName: "CPU", CPUCores: 8, Arch: "x86_64", OS: "Linux", Kernel: "6.8",
+		CPU:       cpuCounters{Total: 100, Idle: 50},
+		Memory:    map[string]uint64{"MemTotal": 1024, "MemAvailable": 512},
+		DiskTotal: 4096, DiskUsed: 1024, Uptime: 100, GPUOK: true,
+	}
+	if err := validateRemoteReport(valid, true); err != nil {
+		t.Fatalf("valid report rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*remoteReport)
+	}{
+		{"missing memory", func(r *remoteReport) { r.Memory = nil }},
+		{"available exceeds total", func(r *remoteReport) { r.Memory["MemAvailable"] = 2048 }},
+		{"zero disk", func(r *remoteReport) { r.DiskTotal = 0 }},
+		{"disk used exceeds total", func(r *remoteReport) { r.DiskUsed = r.DiskTotal + 1 }},
+		{"missing CPU", func(r *remoteReport) { r.CPUName = "" }},
+		{"GPU command failure", func(r *remoteReport) { r.GPUOK = false }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			copy := valid
+			copy.Memory = map[string]uint64{"MemTotal": 1024, "MemAvailable": 512}
+			test.mutate(&copy)
+			if err := validateRemoteReport(copy, true); err == nil {
+				t.Fatal("degraded report was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateRemoteReportDistinguishesNoGPUFromFailure(t *testing.T) {
+	t.Parallel()
+	report := remoteReport{
+		CPUName: "CPU", CPUCores: 8, Arch: "x86_64", OS: "Linux", Kernel: "6.8",
+		CPU: cpuCounters{Total: 100}, Memory: map[string]uint64{"MemTotal": 1024, "MemAvailable": 512},
+		DiskTotal: 4096, Uptime: 100, GPUOK: true,
+	}
+	if len(report.GPUs) != 0 {
+		t.Fatal("test report unexpectedly has GPUs")
+	}
+	if err := validateRemoteReport(report, true); err != nil {
+		t.Fatalf("successful zero-GPU result rejected: %v", err)
+	}
+	report.GPUOK = false
+	if err := validateRemoteReport(report, true); err == nil {
+		t.Fatal("failed GPU command was accepted")
+	}
+}
+
+func TestMarkSlurmUnavailableReplacesStaleSnapshot(t *testing.T) {
+	t.Parallel()
+	store := slurm.NewStore()
+	store.Set("cluster-a", slurm.Snapshot{SourceID: "cluster-a", Available: true, JobsRunning: 3})
+	p := &Provider{cfg: config.LinuxSSHConfig{ID: "cluster-a", EnableSlurm: true}, slurmStore: store}
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	p.markSlurmUnavailable(now, "SSH collection failed")
+	snapshot, ok := store.Get("cluster-a")
+	if !ok || snapshot.Available || snapshot.Error != "SSH collection failed" || !snapshot.CollectedAt.Equal(now) || snapshot.JobsRunning != 0 {
+		t.Fatalf("stale Slurm snapshot was not replaced: %#v", snapshot)
 	}
 }

@@ -25,6 +25,8 @@ type Job struct {
 type Snapshot struct {
 	SourceID       string      `json:"source_id"`
 	CollectedAt    time.Time   `json:"collected_at"`
+	Available      bool        `json:"available"`
+	Error          string      `json:"error,omitempty"`
 	ControllerUp   bool        `json:"controller_up"`
 	NodeDaemonUp   bool        `json:"node_daemon_up"`
 	Partitions     []Partition `json:"partitions"`

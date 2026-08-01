@@ -3,7 +3,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/komari-bridge ./cmd/komari-bridge
+ARG VERSION=v0.2.0-dev
+ARG COMMIT=unknown
+ARG BUILD_TIME
+RUN VERSION="$VERSION" COMMIT="$COMMIT" BUILD_TIME="$BUILD_TIME" OUTPUT=/out/komari-bridge ./scripts/build.sh
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && addgroup -S bridge && adduser -S -G bridge bridge

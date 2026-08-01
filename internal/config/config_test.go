@@ -117,3 +117,70 @@ providers:
 		t.Fatalf("Load() error = %v", err)
 	}
 }
+
+func TestRejectsDuplicateMetricAuthorities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: 123456789012
+providers:
+  agentless_ssh:
+    - id: linux-a
+      address: linux-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+      attach_to: &target
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:105
+  windows_ssh:
+    - id: windows-a
+      address: windows-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+      attach_to: *target
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "both own metrics") || !strings.Contains(err.Error(), "qemu:105") {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestWindowsWSLParentDoesNotClaimHostMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: 123456789012
+providers:
+  agentless_ssh:
+    - id: linux-a
+      address: linux-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+      attach_to: &target
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:105
+  windows_wsl:
+    - id: windows-a
+      address: windows-a.example.internal:22
+      user: monitor
+      password: test-only
+      insecure_ignore_host_key: true
+      attach_to: *target
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}

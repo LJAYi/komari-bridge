@@ -204,6 +204,46 @@ func validate(cfg Config) error {
 			}
 		}
 	}
+	if err := validateUniqueMetricAuthorities(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateUniqueMetricAuthorities(cfg Config) error {
+	type authority struct {
+		path string
+		id   string
+		to   ResourceIdentity
+	}
+	var authorities []authority
+	for _, item := range []struct {
+		path string
+		list []LinuxSSHConfig
+	}{
+		{"agentless_ssh", cfg.Providers.AgentlessSSH},
+		{"linux_ssh", cfg.Providers.LinuxSSH},
+	} {
+		for _, p := range item.list {
+			if p.AttachTo.SourceType != "" {
+				authorities = append(authorities, authority{path: item.path, id: p.ID, to: p.AttachTo})
+			}
+		}
+	}
+	for _, p := range cfg.Providers.WindowsSSH {
+		if p.AttachTo.SourceType != "" {
+			authorities = append(authorities, authority{path: "windows_ssh", id: p.ID, to: p.AttachTo})
+		}
+	}
+
+	owners := make(map[string]authority)
+	for _, candidate := range authorities {
+		key := candidate.to.SourceType + "/" + candidate.to.SourceID + "/" + candidate.to.ExternalID
+		if current, ok := owners[key]; ok {
+			return fmt.Errorf("providers.%s %q and providers.%s %q both own metrics for %s", current.path, current.id, candidate.path, candidate.id, key)
+		}
+		owners[key] = candidate
+	}
 	return nil
 }
 

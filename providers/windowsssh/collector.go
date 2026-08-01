@@ -44,12 +44,16 @@ function Get-NvidiaGpu {
         [void]$process.Start()
         if (-not $process.WaitForExit(8000)) {
             $process.Kill()
-            return @()
+            return [pscustomobject]@{ ok = $false; devices = @() }
         }
         $output = $process.StandardOutput.ReadToEnd()
+		if ($process.ExitCode -ne 0) {
+			return [pscustomobject]@{ ok = $false; devices = @() }
+		}
         foreach ($line in ($output -split '[\r\n]+')) {
+			if (-not $line.Trim()) { continue }
             $fields = @($line -split ',' | ForEach-Object { $_.Trim() })
-            if ($fields.Count -ne 6) { continue }
+			if ($fields.Count -ne 6) { return [pscustomobject]@{ ok = $false; devices = @() } }
             $result += [pscustomobject]@{
                 name = $fields[1]
                 utilization = [double]$fields[2]
@@ -58,8 +62,8 @@ function Get-NvidiaGpu {
                 temperature = [int]([double]$fields[5])
             }
         }
-    } catch {}
-    return @($result)
+		return [pscustomobject]@{ ok = $true; devices = @($result) }
+    } catch { return [pscustomobject]@{ ok = $false; devices = @() } }
 }
 
 $cpuName = ""
@@ -76,6 +80,7 @@ $memoryFree = [int64]0
 $uptime = [int64]0
 $processes = 0
 $windowsGpus = @()
+$windowsGpuOK = $false
 if (__COLLECT_WINDOWS__) {
     $processors = @(Get-CimInstance Win32_Processor)
     $operatingSystem = Get-CimInstance Win32_OperatingSystem
@@ -95,7 +100,9 @@ if (__COLLECT_WINDOWS__) {
     $memoryFree = [int64]$operatingSystem.FreePhysicalMemory * 1KB
     $uptime = [int64]((Get-Date) - $operatingSystem.LastBootUpTime).TotalSeconds
     $processes = @(Get-Process).Count
-    $windowsGpus = @(Get-NvidiaGpu)
+	$gpuResult = Get-NvidiaGpu
+	$windowsGpuOK = [bool]$gpuResult.ok
+	$windowsGpus = @($gpuResult.devices)
 }
 
 $running = @()
@@ -150,6 +157,7 @@ try {
         uptime = $uptime
         processes = $processes
         gpus = @($windowsGpus)
+		gpu_ok = $windowsGpuOK
     }
     wsl = @($wsl)
 } | ConvertTo-Json -Depth 10 -Compress
@@ -238,7 +246,13 @@ def network_info():
     return {"up": up, "down": down}
 
 def gpu_info():
-    output = command(["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"])
+    try:
+        completed = subprocess.run(["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+    except Exception:
+        return False, []
+    if completed.returncode != 0:
+        return False, []
+    output = completed.stdout.strip()
     result = []
     for line in output.splitlines():
         fields = [field.strip() for field in line.split(",")]
@@ -247,11 +261,12 @@ def gpu_info():
         try:
             result.append({"name": fields[1], "utilization": float(fields[2]), "memory_used": int(float(fields[3]) * 1048576), "memory_total": int(float(fields[4]) * 1048576), "temperature": int(float(fields[5]))})
         except ValueError:
-            pass
-    return result
+            return False, []
+    return True, result
 
 cpu_name, cpu_cores, physical_cores, cpu = cpu_info()
 disk_total, disk_used = disk_info()
+gpu_ok, gpus = gpu_info()
 try:
     uptime = int(float(open("/proc/uptime", encoding="utf-8").read().split()[0]))
 except Exception:
@@ -261,5 +276,5 @@ try:
 except OSError:
     processes = 0
 
-print(json.dumps({"cpu_name": cpu_name, "cpu_cores": cpu_cores, "cpu_physical_cores": physical_cores, "arch": platform.machine(), "os": os_release(), "kernel": platform.release(), "cpu": cpu, "memory": memory_info(), "load": list(os.getloadavg()), "disk_total": disk_total, "disk_used": disk_used, "network": network_info(), "uptime": uptime, "processes": processes, "gpus": gpu_info()}, separators=(",", ":")))
+print(json.dumps({"cpu_name": cpu_name, "cpu_cores": cpu_cores, "cpu_physical_cores": physical_cores, "arch": platform.machine(), "os": os_release(), "kernel": platform.release(), "cpu": cpu, "memory": memory_info(), "load": list(os.getloadavg()), "disk_total": disk_total, "disk_used": disk_used, "network": network_info(), "uptime": uptime, "processes": processes, "gpus": gpus, "gpu_ok": gpu_ok}, separators=(",", ":")))
 `

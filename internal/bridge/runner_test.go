@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -189,6 +190,7 @@ func TestBasicInfoUploadsAgainOnlyWhenContentChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.BasicInfo.DiskTotal++
+	snapshot.Report.Disk.Total++
 	if err := runner.Cycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +206,86 @@ func TestBasicInfoUploadsAgainOnlyWhenContentChanges(t *testing.T) {
 	}
 	if len(infos) != 2 || infos[1].DiskTotal != infos[0].DiskTotal+1 {
 		t.Fatalf("basic info uploads = %#v", infos)
+	}
+}
+
+func TestInvalidAuthoritySnapshotUsesLastValidValue(t *testing.T) {
+	identity := model.Identity{SourceType: "proxmox", SourceID: "site-a", ExternalID: "qemu:107"}
+	pve, windows := authoritativeFixtures(identity)
+	current := windows
+	pveProvider := &scriptedProvider{id: "site-a", sourceType: "proxmox", collect: func() ([]model.Snapshot, error) {
+		return []model.Snapshot{pve}, nil
+	}}
+	windowsProvider := &scriptedProvider{id: "windows-a", sourceType: "windows_ssh", targets: []model.Identity{identity}, collect: func() ([]model.Snapshot, error) {
+		return []model.Snapshot{current}, nil
+	}}
+	recorder := &rpcRecorder{}
+	runner, closeRunner := newTestRunner(t, []provider.Provider{pveProvider, windowsProvider}, recorder)
+	defer closeRunner()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	runner.now = func() time.Time { return now }
+
+	if err := runner.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current.Report.RAM.Used = current.Report.RAM.Total + 1
+	now = now.Add(20 * time.Second)
+	err := runner.Cycle(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid authoritative snapshot") || !strings.Contains(err.Error(), "memory usage") {
+		t.Fatalf("Cycle() error = %v", err)
+	}
+	methods, _ := recorder.snapshot()
+	if len(methods) != 3 || methods[2] != "agent.report" {
+		t.Fatalf("invalid authority did not reuse the last valid report: %v", methods)
+	}
+}
+
+func TestInvalidDiscoveryMetricsDoNotRejectValidAuthority(t *testing.T) {
+	identity := model.Identity{SourceType: "proxmox", SourceID: "site-a", ExternalID: "qemu:107"}
+	pve, windows := authoritativeFixtures(identity)
+	pve.Report.RAM.Used = pve.Report.RAM.Total + 1
+	pveProvider := &scriptedProvider{id: "site-a", sourceType: "proxmox", collect: func() ([]model.Snapshot, error) {
+		return []model.Snapshot{pve}, nil
+	}}
+	windowsProvider := &scriptedProvider{id: "windows-a", sourceType: "windows_ssh", targets: []model.Identity{identity}, collect: func() ([]model.Snapshot, error) {
+		return []model.Snapshot{windows}, nil
+	}}
+	recorder := &rpcRecorder{}
+	runner, closeRunner := newTestRunner(t, []provider.Provider{pveProvider, windowsProvider}, recorder)
+	defer closeRunner()
+	if err := runner.Cycle(context.Background()); err != nil {
+		t.Fatalf("valid authority was rejected because discovery metrics were invalid: %v", err)
+	}
+	methods, infos := recorder.snapshot()
+	if len(methods) != 2 || len(infos) != 1 || infos[0].DiskTotal != windows.BasicInfo.DiskTotal {
+		t.Fatalf("unexpected uploads: methods=%v infos=%#v", methods, infos)
+	}
+}
+
+func TestValidateSnapshotRejectsMixedOrImpossibleTotals(t *testing.T) {
+	_, valid := authoritativeFixtures(model.Identity{SourceType: "test", SourceID: "test", ExternalID: "host:test"})
+	if err := validateSnapshot(valid); err != nil {
+		t.Fatalf("valid snapshot rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*model.Snapshot)
+		want   string
+	}{
+		{name: "mixed disk totals", mutate: func(s *model.Snapshot) { s.BasicInfo.DiskTotal-- }, want: "basic disk total"},
+		{name: "memory exceeds total", mutate: func(s *model.Snapshot) { s.Report.RAM.Used = s.Report.RAM.Total + 1 }, want: "memory usage"},
+		{name: "missing online memory", mutate: func(s *model.Snapshot) { s.BasicInfo.MemoryTotal, s.Report.RAM.Total, s.Report.RAM.Used = 0, 0, 0 }, want: "no memory total"},
+		{name: "CPU over 100", mutate: func(s *model.Snapshot) { s.Report.CPU.Usage = 101 }, want: "CPU usage"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := valid
+			test.mutate(&snapshot)
+			if err := validateSnapshot(snapshot); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateSnapshot() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/LJAYi/komari-bridge/internal/bridge"
+	"github.com/LJAYi/komari-bridge/internal/buildinfo"
 	"github.com/LJAYi/komari-bridge/internal/config"
 	"github.com/LJAYi/komari-bridge/internal/httpapi"
 	"github.com/LJAYi/komari-bridge/internal/komari"
@@ -25,7 +26,12 @@ import (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to configuration file")
 	once := flag.Bool("once", false, "run one collection cycle and exit")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+	if *showVersion {
+		buildinfo.Write(os.Stdout)
+		return
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := config.Load(*configPath)
@@ -71,7 +77,8 @@ func main() {
 		}
 	}()
 	defer httpServer.Shutdown(context.Background())
-	logger.Info("komari-bridge started", "interval", cfg.Scheduler.Interval.Duration, "providers", len(providers))
+	logger.Info("komari-bridge started", "version", buildinfo.Version, "commit", buildinfo.Commit,
+		"interval", cfg.Scheduler.Interval.Duration, "providers", len(providers))
 	if err := runner.Run(ctx, cfg.Scheduler.Interval.Duration); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("bridge stopped", "error", err)
 		os.Exit(1)

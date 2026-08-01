@@ -135,6 +135,7 @@ type remoteReport struct {
 	Uptime           int64             `json:"uptime"`
 	Processes        int               `json:"processes"`
 	GPUs             []model.GPUDevice `json:"gpus"`
+	GPUOK            bool              `json:"gpu_ok"`
 	Slurm            remoteSlurm       `json:"slurm"`
 }
 
@@ -158,11 +159,18 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	output, err := p.run(ctx, script)
 	if err != nil {
 		p.closeLocked()
+		p.markSlurmUnavailable(time.Now().UTC(), "SSH collection failed: "+err.Error())
 		return nil, err
 	}
 	var raw remoteReport
 	if err := json.Unmarshal(output, &raw); err != nil {
+		p.markSlurmUnavailable(time.Now().UTC(), "collector output was invalid")
 		return nil, fmt.Errorf("decode SSH collector output: %w", err)
+	}
+	if !p.slurmOnly {
+		if err := validateRemoteReport(raw, p.cfg.EnableNVIDIA); err != nil {
+			return nil, fmt.Errorf("validate SSH collector output: %w", err)
+		}
 	}
 	now := time.Now().UTC()
 	cpuUsage := counterPercent(raw.CPU.Total, raw.CPU.Idle, p.previousCPU.Total, p.previousCPU.Idle)
@@ -206,25 +214,29 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		}
 		report.GPU = &model.GPUReport{Count: len(raw.GPUs), AverageUsage: total / float64(len(raw.GPUs)), DetailedInfo: raw.GPUs}
 	}
-	if p.cfg.EnableSlurm && raw.Slurm.Available && p.slurmStore != nil {
+	if p.cfg.EnableSlurm && p.slurmStore != nil {
 		snapshot := slurm.Snapshot{
-			SourceID: p.cfg.ID, CollectedAt: now,
+			SourceID: p.cfg.ID, CollectedAt: now, Available: raw.Slurm.Available,
 			ControllerUp: raw.Slurm.ControllerUp, NodeDaemonUp: raw.Slurm.NodeDaemonUp,
 			Partitions: raw.Slurm.Partitions, Jobs: raw.Slurm.Jobs,
 			GPUsConfigured: raw.Slurm.GPUsConfigured, GPUsAllocated: raw.Slurm.GPUsAllocated,
 		}
-		for _, job := range snapshot.Jobs {
-			switch strings.ToUpper(job.State) {
-			case "RUNNING":
-				snapshot.JobsRunning++
-			case "PENDING":
-				snapshot.JobsPending++
-			default:
-				snapshot.JobsOther++
+		if raw.Slurm.Available {
+			for _, job := range snapshot.Jobs {
+				switch strings.ToUpper(job.State) {
+				case "RUNNING":
+					snapshot.JobsRunning++
+				case "PENDING":
+					snapshot.JobsPending++
+				default:
+					snapshot.JobsOther++
+				}
 			}
+			report.Message = fmt.Sprintf("Slurm: %d running, %d pending; GPUs %d/%d allocated", snapshot.JobsRunning, snapshot.JobsPending, snapshot.GPUsAllocated, snapshot.GPUsConfigured)
+		} else {
+			snapshot.Error = "Slurm commands unavailable"
 		}
 		p.slurmStore.Set(p.cfg.ID, snapshot)
-		report.Message = fmt.Sprintf("Slurm: %d running, %d pending; GPUs %d/%d allocated", snapshot.JobsRunning, snapshot.JobsPending, snapshot.GPUsAllocated, snapshot.GPUsConfigured)
 	}
 	if p.slurmOnly {
 		return nil, nil
@@ -242,6 +254,42 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		},
 		Report: report, CollectedAt: now, Online: true, Priority: 100,
 	}}, nil
+}
+
+func (p *Provider) markSlurmUnavailable(now time.Time, message string) {
+	if !p.cfg.EnableSlurm || p.slurmStore == nil {
+		return
+	}
+	p.slurmStore.Set(p.cfg.ID, slurm.Snapshot{
+		SourceID: p.cfg.ID, CollectedAt: now, Available: false, Error: message,
+	})
+}
+
+func validateRemoteReport(raw remoteReport, requireGPU bool) error {
+	if strings.TrimSpace(raw.CPUName) == "" || raw.CPUCores <= 0 || raw.CPU.Total == 0 {
+		return fmt.Errorf("invalid CPU data")
+	}
+	memTotal, ok := raw.Memory["MemTotal"]
+	if !ok || memTotal == 0 {
+		return fmt.Errorf("missing memory total")
+	}
+	memAvailable, ok := raw.Memory["MemAvailable"]
+	if !ok || memAvailable > memTotal {
+		return fmt.Errorf("invalid available memory")
+	}
+	if raw.DiskTotal <= 0 || raw.DiskUsed < 0 || raw.DiskUsed > raw.DiskTotal {
+		return fmt.Errorf("invalid disk usage: used=%d total=%d", raw.DiskUsed, raw.DiskTotal)
+	}
+	if strings.TrimSpace(raw.Arch) == "" || strings.TrimSpace(raw.OS) == "" || strings.TrimSpace(raw.Kernel) == "" {
+		return fmt.Errorf("missing operating system identity")
+	}
+	if raw.Uptime <= 0 {
+		return fmt.Errorf("invalid uptime")
+	}
+	if requireGPU && !raw.GPUOK {
+		return fmt.Errorf("NVIDIA GPU collection failed")
+	}
+	return nil
 }
 
 func formatGPUName(gpus []model.GPUDevice) string {

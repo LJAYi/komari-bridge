@@ -19,9 +19,16 @@ such as Slurm.
 ## Local checks
 
 ```bash
-gofmt -w .
-go vet ./...
-go test ./...
+make verify
+```
+
+Use `make build` for a native binary or `make build-linux-amd64` for the PVE
+deployment artifact. Both targets use the installed Go toolchain without
+automatic toolchain downloads and embed version, commit, and build time. A
+release build should set an explicit version, for example:
+
+```bash
+VERSION=v0.2.0 make build-linux-amd64
 ```
 
 Integration tests must remain opt-in and must not contain real connection

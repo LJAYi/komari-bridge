@@ -45,6 +45,26 @@ go run ./cmd/komari-bridge -config config.yaml -once
 Remove `-once` after checking the generated clients. The interval must stay
 below Komari's 35-second HTTP presence TTL; 20 seconds is recommended.
 
+Build a local binary using the installed Go toolchain:
+
+```bash
+make build
+./bin/komari-bridge -version
+```
+
+For the Linux AMD64 binary used by the current PVE deployments:
+
+```bash
+make build-linux-amd64
+./bin/komari-bridge-linux-amd64 -version
+```
+
+The build script embeds `version`, `commit`, and `build_time`. Set `VERSION`,
+`COMMIT`, and `BUILD_TIME` to override them in release automation;
+`SOURCE_DATE_EPOCH` is also supported for reproducible builds. By default it
+records the actual UTC build time. The script sets `GOTOOLCHAIN=local`, so it
+will fail clearly instead of downloading a temporary Go toolchain.
+
 To build a container:
 
 ```bash
@@ -140,8 +160,16 @@ pveum acl modify /vms/100 \
   --tokens 'komari-bridge@pve!monitor'
 ```
 
-The command is embedded and cannot be configured by API callers. Collection
-falls back to PVE memory if QGA is unavailable.
+The command is embedded and cannot be configured by API callers. QGA memory is
+an accuracy contract: the bridge never falls back to PVE process memory. A
+transient failure reuses the last valid guest sample for up to 60 seconds;
+before the first valid sample or after that grace period, host reporting stops
+until QGA recovers.
+
+PVE also cannot observe filesystem usage inside a QEMU guest. The bridge leaves
+QEMU disk totals and usage unavailable instead of presenting allocated virtual
+disk capacity as a misleading 0% filesystem gauge. An attached guest-side
+collector supplies both values when one is configured.
 
 ## Agentless SSH fallback
 
@@ -189,6 +217,10 @@ curl -H "Authorization: Bearer $BRIDGE_API_KEY" \
 ```
 
 `/healthz` is intentionally unauthenticated.
+
+Slurm responses include `available` and an optional `error`. A failed SSH or
+Slurm command refreshes the API with `available: false` instead of leaving the
+last successful queue state looking current.
 
 ## Windows and WSL discovery
 

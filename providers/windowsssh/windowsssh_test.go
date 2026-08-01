@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LJAYi/komari-bridge/internal/config"
+	"github.com/LJAYi/komari-bridge/internal/model"
 )
 
 func TestRunWithReconnectRetriesOnceAfterTransportFailure(t *testing.T) {
@@ -86,5 +87,81 @@ func TestCollectorUsesShortEncodedBootstrap(t *testing.T) {
 	}
 	if !strings.Contains(collectorScript(false), "if ($false)") {
 		t.Fatal("WSL-only collector does not disable Windows host collection")
+	}
+}
+
+func TestValidateWindowsReportRejectsDegradedHostData(t *testing.T) {
+	t.Parallel()
+	valid := windowsReport{CPUName: "CPU", CPUCores: 16, Arch: "AMD64", OS: "Windows", Kernel: "10.0", MemoryTotal: 1024, MemoryFree: 512, DiskTotal: 4096, DiskFree: 2048, Uptime: 100}
+	if err := validateWindowsReport(valid); err != nil {
+		t.Fatalf("valid report rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*windowsReport)
+	}{
+		{"missing CPU", func(r *windowsReport) { r.CPUName = "" }},
+		{"zero memory", func(r *windowsReport) { r.MemoryTotal = 0 }},
+		{"free exceeds memory", func(r *windowsReport) { r.MemoryFree = r.MemoryTotal + 1 }},
+		{"zero disk", func(r *windowsReport) { r.DiskTotal = 0 }},
+		{"free exceeds disk", func(r *windowsReport) { r.DiskFree = r.DiskTotal + 1 }},
+		{"zero uptime", func(r *windowsReport) { r.Uptime = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			copy := valid
+			test.mutate(&copy)
+			if err := validateWindowsReport(copy); err == nil {
+				t.Fatal("degraded report was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateWSLDataFailureIsScopedToDistro(t *testing.T) {
+	t.Parallel()
+	valid := wslData{
+		CPUName: "CPU", CPUCores: 4, Arch: "x86_64", OS: "Ubuntu", Kernel: "6.6",
+		CPU: cpuCounters{Total: 100}, Memory: map[string]uint64{"MemTotal": 1024, "MemAvailable": 512},
+		DiskTotal: 4096, DiskUsed: 1024, Uptime: 100, GPUOK: true,
+	}
+	if err := validateWSLData(valid, true); err != nil {
+		t.Fatalf("valid WSL data rejected: %v", err)
+	}
+	broken := valid
+	broken.Memory = nil
+	if err := validateWSLData(broken, true); err == nil {
+		t.Fatal("broken WSL data accepted")
+	}
+	host := windowsReport{CPUName: "CPU", CPUCores: 16, Arch: "AMD64", OS: "Windows", Kernel: "10.0", MemoryTotal: 1024, MemoryFree: 512, DiskTotal: 4096, DiskFree: 2048, Uptime: 100}
+	if err := validateWindowsReport(host); err != nil {
+		t.Fatalf("WSL failure contaminated host validation: %v", err)
+	}
+}
+
+func TestWSLGPUCachePreservesDevicesDuringTransientFailure(t *testing.T) {
+	t.Parallel()
+	provider := &Provider{previousWGPU: make(map[string]cachedGPUs)}
+	now := time.Now()
+	devices := []model.GPUDevice{{Name: "GPU", MemoryTotal: 1024}}
+	success := wslReport{GUID: "guid-a", Data: &wslData{GPUOK: true, GPUs: devices}}
+	if !provider.stabilizeWSLGPU(&success, now) {
+		t.Fatal("successful GPU result was rejected")
+	}
+	failure := wslReport{GUID: "guid-a", Data: &wslData{GPUOK: false}}
+	if !provider.stabilizeWSLGPU(&failure, now.Add(20*time.Second)) || !failure.Data.GPUOK || len(failure.Data.GPUs) != 1 {
+		t.Fatalf("fresh GPU cache was not reused: %#v", failure.Data)
+	}
+	failure.Data.GPUs[0].Name = "changed"
+	if provider.previousWGPU["guid-a"].devices[0].Name != "GPU" {
+		t.Fatal("GPU cache aliases a caller-owned slice")
+	}
+	expired := wslReport{GUID: "guid-a", Data: &wslData{GPUOK: false}}
+	if provider.stabilizeWSLGPU(&expired, now.Add(wslGPUGracePeriod+time.Second)) {
+		t.Fatal("expired GPU cache was reused")
+	}
+	restarted := &Provider{previousWGPU: make(map[string]cachedGPUs)}
+	if restarted.stabilizeWSLGPU(&expired, now) {
+		t.Fatal("failed first GPU probe was accepted")
 	}
 }

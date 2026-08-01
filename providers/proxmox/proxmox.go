@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LJAYi/komari-bridge/internal/config"
@@ -26,6 +27,33 @@ type Provider struct {
 	names       map[string]string
 	resources   map[string]config.ResourceOverride
 	http        *http.Client
+	cacheMu     sync.RWMutex
+	nodeStatus  map[string]nodeStatusEnrichment
+	guestOS     map[string]guestOSEnrichment
+	guestMemory map[string]cachedGuestMemory
+}
+
+const guestMemoryGracePeriod = time.Minute
+
+type cachedGuestMemory struct {
+	memory  guestMemory
+	savedAt time.Time
+}
+
+type nodeStatusEnrichment struct {
+	CPUName          string
+	CPUCores         int
+	CPUPhysicalCores int
+	Arch             string
+	OS               string
+	KernelVersion    string
+	Version          string
+}
+
+type guestOSEnrichment struct {
+	OS            string
+	Arch          string
+	KernelVersion string
 }
 
 func New(cfg config.ProxmoxConfig, timeout time.Duration) (*Provider, error) {
@@ -38,7 +66,10 @@ func New(cfg config.ProxmoxConfig, timeout time.Duration) (*Provider, error) {
 	return &Provider{
 		id: cfg.ID, endpoint: u.String(), tokenID: cfg.TokenID, secret: cfg.TokenSecret,
 		group: cfg.Group, skipStopped: cfg.SkipStopped, names: cfg.Names, resources: cfg.Resources,
-		http: &http.Client{Timeout: timeout, Transport: transport},
+		http:        &http.Client{Timeout: timeout, Transport: transport},
+		nodeStatus:  make(map[string]nodeStatusEnrichment),
+		guestOS:     make(map[string]guestOSEnrichment),
+		guestMemory: make(map[string]cachedGuestMemory),
 	}, nil
 }
 
@@ -137,38 +168,59 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		if item.Type == "node" {
 			var status nodeStatusResponse
 			node := firstNonEmpty(item.Node, item.Name, strings.TrimPrefix(item.ID, "node/"))
-			if err := p.getJSON(ctx, "/api2/json/nodes/"+url.PathEscape(node)+"/status", &status); err == nil {
-				snapshot.BasicInfo.CPUName = cpuDisplayName(status.Data.CPUInfo.Model, status.Data.CPUInfo.Sockets)
-				snapshot.BasicInfo.CPUCores = status.Data.CPUInfo.CPUs
-				snapshot.BasicInfo.CPUPhysicalCores = status.Data.CPUInfo.Cores
-				// Proxmox VE is distributed for the amd64 platform. Keep the
-				// Komari spelling consistent with QGA and Linux collectors.
-				snapshot.BasicInfo.Arch = "x86_64"
-				snapshot.BasicInfo.OS = "Proxmox VE"
-				snapshot.BasicInfo.KernelVersion = status.Data.Kernel
-				snapshot.BasicInfo.Version = status.Data.PVEVersion
+			if err := p.getJSON(ctx, "/api2/json/nodes/"+url.PathEscape(node)+"/status", &status); err == nil && validNodeStatus(status) {
+				enrichment := nodeStatusEnrichment{
+					CPUName:  cpuDisplayName(status.Data.CPUInfo.Model, status.Data.CPUInfo.Sockets),
+					CPUCores: status.Data.CPUInfo.CPUs, CPUPhysicalCores: status.Data.CPUInfo.Cores,
+					// Proxmox VE is distributed for the amd64 platform. Keep the
+					// Komari spelling consistent with QGA and Linux collectors.
+					Arch: "x86_64", OS: "Proxmox VE", KernelVersion: status.Data.Kernel,
+					Version: status.Data.PVEVersion,
+				}
+				p.storeNodeStatus(node, enrichment)
+				applyNodeStatus(&snapshot, enrichment)
+			} else if enrichment, ok := p.loadNodeStatus(node); ok {
+				applyNodeStatus(&snapshot, enrichment)
+			} else {
+				// Node status is the only source of the real CPU identity and
+				// architecture. Do not publish a generic first sample if this
+				// required enrichment is temporarily unavailable.
+				snapshot.Online = false
 			}
 		}
 		if item.Type == "qemu" && item.Status == "running" {
 			var osInfo guestOSResponse
 			path := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/get-osinfo", url.PathEscape(item.Node), item.VMID)
-			if err := p.getJSON(ctx, path, &osInfo); err == nil && osInfo.Data.Result.Name != "" {
-				snapshot.BasicInfo.OS = firstNonEmpty(osInfo.Data.Result.PrettyName, osInfo.Data.Result.Name)
-				snapshot.BasicInfo.Arch = osInfo.Data.Result.Machine
-				snapshot.BasicInfo.KernelVersion = osInfo.Data.Result.KernelRelease
+			if err := p.getJSON(ctx, path, &osInfo); err == nil && validGuestOS(osInfo) {
+				enrichment := guestOSEnrichment{
+					OS:   firstNonEmpty(osInfo.Data.Result.PrettyName, osInfo.Data.Result.Name),
+					Arch: osInfo.Data.Result.Machine, KernelVersion: osInfo.Data.Result.KernelRelease,
+				}
+				p.storeGuestOS(snapshot.Identity.ExternalID, enrichment)
+				applyGuestOS(&snapshot, enrichment)
+			} else if enrichment, ok := p.loadGuestOS(snapshot.Identity.ExternalID); ok {
+				applyGuestOS(&snapshot, enrichment)
 			}
 		}
 		if override, ok := p.resources[snapshot.Identity.ExternalID]; ok {
 			if item.Type == "qemu" && item.Status == "running" && strings.EqualFold(override.GuestMemory, "qga") {
 				if memory, err := p.collectGuestMemory(ctx, item.Node, item.VMID); err == nil {
-					snapshot.BasicInfo.MemoryTotal = memory.MemoryTotal
-					snapshot.BasicInfo.SwapTotal = memory.SwapTotal
-					snapshot.Report.RAM = model.Usage{Total: memory.MemoryTotal, Used: usedMemory(memory.MemoryTotal, memory.MemoryAvailable)}
-					snapshot.Report.Swap = model.Usage{Total: memory.SwapTotal, Used: usedMemory(memory.SwapTotal, memory.SwapFree)}
-					snapshot.Report.Message = "Guest memory from /proc/meminfo via the QEMU Guest Agent; remaining metrics observed by Proxmox."
+					p.storeGuestMemory(snapshot.Identity.ExternalID, memory)
+					applyGuestMemory(&snapshot, memory, false)
 					snapshot.Tags["memory_source"] = "qga_proc_meminfo"
+				} else if memory, ok := p.loadGuestMemory(snapshot.Identity.ExternalID); ok {
+					applyGuestMemory(&snapshot, memory, true)
+					snapshot.Tags["memory_source"] = "qga_proc_meminfo_cached"
 				} else {
-					snapshot.Tags["memory_source"] = "proxmox_fallback"
+					// guest_memory:qga is an explicit accuracy contract. Until QGA
+					// succeeds there is no compatible memory observation to report;
+					// mark this snapshot offline rather than mixing in PVE process memory.
+					snapshot.Online = false
+					snapshot.BasicInfo.MemoryTotal = 0
+					snapshot.BasicInfo.SwapTotal = 0
+					snapshot.Report.RAM = model.Usage{}
+					snapshot.Report.Swap = model.Usage{}
+					snapshot.Tags["memory_source"] = "qga_unavailable"
 				}
 			}
 			if override.Name != "" {
@@ -244,6 +296,12 @@ func parseGuestMemory(contents string) (guestMemory, error) {
 	if !present["MemTotal"] || !present["MemAvailable"] || values["MemTotal"] <= 0 {
 		return guestMemory{}, fmt.Errorf("QGA memory output is missing required fields")
 	}
+	if values["MemAvailable"] > values["MemTotal"] {
+		return guestMemory{}, fmt.Errorf("QGA memory available exceeds total")
+	}
+	if present["SwapTotal"] != present["SwapFree"] || values["SwapFree"] > values["SwapTotal"] {
+		return guestMemory{}, fmt.Errorf("QGA swap output is inconsistent")
+	}
 	return guestMemory{
 		MemoryTotal: values["MemTotal"], MemoryAvailable: values["MemAvailable"],
 		SwapTotal: values["SwapTotal"], SwapFree: values["SwapFree"],
@@ -255,6 +313,87 @@ func usedMemory(total, available int64) int64 {
 		return 0
 	}
 	return total - available
+}
+
+func applyNodeStatus(snapshot *model.Snapshot, enrichment nodeStatusEnrichment) {
+	snapshot.BasicInfo.CPUName = enrichment.CPUName
+	snapshot.BasicInfo.CPUCores = enrichment.CPUCores
+	snapshot.BasicInfo.CPUPhysicalCores = enrichment.CPUPhysicalCores
+	snapshot.BasicInfo.Arch = enrichment.Arch
+	snapshot.BasicInfo.OS = enrichment.OS
+	snapshot.BasicInfo.KernelVersion = enrichment.KernelVersion
+	snapshot.BasicInfo.Version = enrichment.Version
+}
+
+func validNodeStatus(status nodeStatusResponse) bool {
+	return strings.TrimSpace(status.Data.CPUInfo.Model) != "" &&
+		status.Data.CPUInfo.CPUs > 0 && status.Data.CPUInfo.Cores > 0 &&
+		status.Data.Kernel != "" && status.Data.PVEVersion != ""
+}
+
+func validGuestOS(info guestOSResponse) bool {
+	result := info.Data.Result
+	return strings.TrimSpace(firstNonEmpty(result.PrettyName, result.Name)) != "" &&
+		strings.TrimSpace(result.Machine) != "" && strings.TrimSpace(result.KernelRelease) != ""
+}
+
+func applyGuestOS(snapshot *model.Snapshot, enrichment guestOSEnrichment) {
+	snapshot.BasicInfo.OS = enrichment.OS
+	snapshot.BasicInfo.Arch = enrichment.Arch
+	snapshot.BasicInfo.KernelVersion = enrichment.KernelVersion
+}
+
+func applyGuestMemory(snapshot *model.Snapshot, memory guestMemory, cached bool) {
+	snapshot.BasicInfo.MemoryTotal = memory.MemoryTotal
+	snapshot.BasicInfo.SwapTotal = memory.SwapTotal
+	snapshot.Report.RAM = model.Usage{Total: memory.MemoryTotal, Used: usedMemory(memory.MemoryTotal, memory.MemoryAvailable)}
+	snapshot.Report.Swap = model.Usage{Total: memory.SwapTotal, Used: usedMemory(memory.SwapTotal, memory.SwapFree)}
+	snapshot.Report.Message = "Guest memory from /proc/meminfo via the QEMU Guest Agent; remaining metrics observed by Proxmox."
+	if cached {
+		snapshot.Report.Message = "Last known guest memory from /proc/meminfo via the QEMU Guest Agent; remaining metrics observed by Proxmox."
+	}
+}
+
+func (p *Provider) storeNodeStatus(key string, enrichment nodeStatusEnrichment) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.nodeStatus[key] = enrichment
+}
+
+func (p *Provider) loadNodeStatus(key string) (nodeStatusEnrichment, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	enrichment, ok := p.nodeStatus[key]
+	return enrichment, ok
+}
+
+func (p *Provider) storeGuestOS(key string, enrichment guestOSEnrichment) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.guestOS[key] = enrichment
+}
+
+func (p *Provider) loadGuestOS(key string) (guestOSEnrichment, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	enrichment, ok := p.guestOS[key]
+	return enrichment, ok
+}
+
+func (p *Provider) storeGuestMemory(key string, memory guestMemory) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.guestMemory[key] = cachedGuestMemory{memory: memory, savedAt: time.Now()}
+}
+
+func (p *Provider) loadGuestMemory(key string) (guestMemory, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	cached, ok := p.guestMemory[key]
+	if !ok || time.Since(cached.savedAt) > guestMemoryGracePeriod {
+		return guestMemory{}, false
+	}
+	return cached.memory, true
 }
 
 func cpuDisplayName(model string, sockets int) string {
@@ -325,6 +464,14 @@ func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
 	if maxCPU < 0 {
 		maxCPU = 0
 	}
+	diskTotal, diskUsed := item.MaxDisk, item.Disk
+	if item.Type == "qemu" {
+		// PVE exposes allocated virtual-disk capacity for QEMU, not guest
+		// filesystem usage. Reporting that capacity with a zero/host-side used
+		// value creates a misleading 0% gauge, so leave the guest disk metric
+		// unavailable until a guest-side authority enriches the snapshot.
+		diskTotal, diskUsed = 0, 0
+	}
 	return model.Snapshot{
 		Identity:         model.Identity{SourceType: p.SourceType(), SourceID: p.id, ExternalID: externalID},
 		ParentExternalID: parentID,
@@ -336,13 +483,13 @@ func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
 		},
 		BasicInfo: model.BasicInfo{
 			CPUName: "PVE observed CPU", CPUCores: maxCPU, OS: osName,
-			MemoryTotal: item.MaxMem, DiskTotal: item.MaxDisk,
+			MemoryTotal: item.MaxMem, DiskTotal: diskTotal,
 			Virtualization: virtualization, Version: "komari-bridge",
 		},
 		Report: model.Report{
 			CPU:     model.CPUReport{Cores: maxCPU, Usage: item.CPU * 100},
 			RAM:     model.Usage{Total: item.MaxMem, Used: item.Mem},
-			Disk:    model.Usage{Total: item.MaxDisk, Used: item.Disk},
+			Disk:    model.Usage{Total: diskTotal, Used: diskUsed},
 			Network: model.NetworkReport{TotalUp: item.NetOut, TotalDown: item.NetIn},
 			Uptime:  item.Uptime,
 			Message: "Metrics observed by Proxmox; guest filesystem and process metrics are unavailable.",

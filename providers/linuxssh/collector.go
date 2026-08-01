@@ -103,7 +103,13 @@ def connection_count(protocol):
 
 def gpu_info():
     query = "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu"
-    output = command(["nvidia-smi", "--query-gpu=" + query, "--format=csv,noheader,nounits"])
+    try:
+        completed = subprocess.run(["nvidia-smi", "--query-gpu=" + query, "--format=csv,noheader,nounits"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+    except Exception:
+        return False, []
+    if completed.returncode != 0:
+        return False, []
+    output = completed.stdout.strip()
     result = []
     for line in output.splitlines():
         fields = [field.strip() for field in line.split(",")]
@@ -118,8 +124,8 @@ def gpu_info():
                 "temperature": int(float(fields[5])),
             })
         except ValueError:
-            pass
-    return result
+            return False, []
+    return True, result
 
 def service_active(name):
     return command(["systemctl", "is-active", name]) == "active"
@@ -173,6 +179,7 @@ def slurm_info():
 
 cpu_name, cpu_cores, physical_cores, cpu = cpu_info()
 disk_total, disk_used = disk_info()
+gpu_ok, gpus = gpu_info()
 try:
     uptime = int(float(open("/proc/uptime", encoding="utf-8").read().split()[0]))
 except Exception:
@@ -199,7 +206,8 @@ print(json.dumps({
     "udp": connection_count("udp"),
     "uptime": uptime,
     "processes": processes,
-    "gpus": gpu_info(),
+    "gpus": gpus,
+    "gpu_ok": gpu_ok,
     "slurm": slurm_info(),
 }, separators=(",", ":")))
 `

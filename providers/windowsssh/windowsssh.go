@@ -33,7 +33,15 @@ type Provider struct {
 	previousWSL  map[string]cpuCounters
 	previousWNet map[string]networkCounters
 	previousWAt  map[string]time.Time
+	previousWGPU map[string]cachedGPUs
 }
+
+type cachedGPUs struct {
+	devices []model.GPUDevice
+	savedAt time.Time
+}
+
+const wslGPUGracePeriod = time.Minute
 
 type cpuCounters struct {
 	Total uint64 `json:"total"`
@@ -67,6 +75,7 @@ type windowsReport struct {
 	Uptime           int64             `json:"uptime"`
 	Processes        int               `json:"processes"`
 	GPUs             []model.GPUDevice `json:"gpus"`
+	GPUOK            bool              `json:"gpu_ok"`
 }
 
 type wslReport struct {
@@ -94,6 +103,7 @@ type wslData struct {
 	Uptime           int64             `json:"uptime"`
 	Processes        int               `json:"processes"`
 	GPUs             []model.GPUDevice `json:"gpus"`
+	GPUOK            bool              `json:"gpu_ok"`
 }
 
 func New(cfg config.WindowsSSHConfig, timeout time.Duration) (*Provider, error) {
@@ -127,6 +137,7 @@ func newProvider(cfg config.WindowsSSHConfig, timeout time.Duration, sourceType 
 		cfg: cfg, timeout: timeout, sourceType: sourceType, emitHost: emitHost,
 		sshConfig:   &ssh.ClientConfig{User: cfg.User, Auth: auth, HostKeyCallback: hostKeyCallback, Timeout: timeout},
 		previousWSL: make(map[string]cpuCounters), previousWNet: make(map[string]networkCounters), previousWAt: make(map[string]time.Time),
+		previousWGPU: make(map[string]cachedGPUs),
 	}, nil
 }
 
@@ -188,21 +199,44 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		}
 		return nil, fmt.Errorf("decode Windows SSH collector output: %w: %s", err, text)
 	}
+	if p.emitHost {
+		if err := validateWindowsReport(raw.Windows); err != nil {
+			return nil, fmt.Errorf("validate Windows SSH collector output: %w", err)
+		}
+	}
 	now := time.Now().UTC()
+	if p.cfg.EnableNVIDIA {
+		for index := range raw.WSL {
+			distro := &raw.WSL[index]
+			if !distro.Online || distro.Data == nil {
+				continue
+			}
+			if !p.stabilizeWSLGPU(distro, now) {
+				// Do not let a failed GPU probe clear GPU metadata previously stored
+				// by Komari, including immediately after a bridge restart.
+				distro.Online, distro.Data = false, nil
+			}
+		}
+	}
 	winNet := networkCounters{Up: raw.Windows.NetworkUp, Down: raw.Windows.NetworkDown}
 	netUp, netDown := rates(winNet, p.previousNet, now.Sub(p.previousAt))
 	p.previousNet, p.previousAt = winNet, now
 
 	windowsGPUs := raw.Windows.GPUs
+	gpuOK := raw.Windows.GPUOK
 	gpuSource := "windows"
-	if p.cfg.EnableNVIDIA && len(windowsGPUs) == 0 {
+	if p.cfg.EnableNVIDIA && (!gpuOK || len(windowsGPUs) == 0) {
 		for _, distro := range raw.WSL {
-			if distro.Online && distro.Data != nil && len(distro.Data.GPUs) > 0 {
+			if distro.Online && distro.Data != nil && distro.Data.GPUOK && len(distro.Data.GPUs) > 0 {
 				windowsGPUs = distro.Data.GPUs
+				gpuOK = true
 				gpuSource = "wsl:" + distro.Name
 				break
 			}
 		}
+	}
+	if p.emitHost && p.cfg.EnableNVIDIA && !gpuOK {
+		return nil, fmt.Errorf("validate Windows SSH collector output: NVIDIA GPU collection failed")
 	}
 	identity := model.Identity{SourceType: p.SourceType(), SourceID: p.cfg.ID, ExternalID: "host:" + p.cfg.ID}
 	resourceType := "windows"
@@ -240,10 +274,75 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	}
 	if p.cfg.DiscoverWSL {
 		for _, distro := range raw.WSL {
+			if distro.Online && distro.Data != nil {
+				// GPU support is optional for an individual WSL distribution. A
+				// failed WSL GPU probe must not invalidate otherwise sound host
+				// metrics (nor the enclosing Windows host).
+				if err := validateWSLData(*distro.Data, false); err != nil {
+					distro.Online, distro.Data = false, nil
+				}
+			}
 			snapshots = append(snapshots, p.wslSnapshot(distro, now))
 		}
 	}
 	return snapshots, nil
+}
+
+func validateWindowsReport(raw windowsReport) error {
+	if strings.TrimSpace(raw.CPUName) == "" || raw.CPUCores <= 0 {
+		return fmt.Errorf("invalid CPU data")
+	}
+	if strings.TrimSpace(raw.Arch) == "" || strings.TrimSpace(raw.OS) == "" || strings.TrimSpace(raw.Kernel) == "" {
+		return fmt.Errorf("missing operating system identity")
+	}
+	if raw.MemoryTotal <= 0 || raw.MemoryFree < 0 || raw.MemoryFree > raw.MemoryTotal {
+		return fmt.Errorf("invalid memory usage: free=%d total=%d", raw.MemoryFree, raw.MemoryTotal)
+	}
+	if raw.DiskTotal <= 0 || raw.DiskFree < 0 || raw.DiskFree > raw.DiskTotal {
+		return fmt.Errorf("invalid disk usage: free=%d total=%d", raw.DiskFree, raw.DiskTotal)
+	}
+	if raw.Uptime <= 0 {
+		return fmt.Errorf("invalid uptime")
+	}
+	return nil
+}
+
+func validateWSLData(raw wslData, requireGPU bool) error {
+	if strings.TrimSpace(raw.CPUName) == "" || raw.CPUCores <= 0 || raw.CPU.Total == 0 {
+		return fmt.Errorf("invalid CPU data")
+	}
+	memTotal, ok := raw.Memory["MemTotal"]
+	if !ok || memTotal == 0 || raw.Memory["MemAvailable"] > memTotal {
+		return fmt.Errorf("invalid memory data")
+	}
+	if raw.DiskTotal <= 0 || raw.DiskUsed < 0 || raw.DiskUsed > raw.DiskTotal {
+		return fmt.Errorf("invalid disk usage")
+	}
+	if strings.TrimSpace(raw.Arch) == "" || strings.TrimSpace(raw.OS) == "" || strings.TrimSpace(raw.Kernel) == "" || raw.Uptime <= 0 {
+		return fmt.Errorf("missing operating system data")
+	}
+	if requireGPU && !raw.GPUOK {
+		return fmt.Errorf("NVIDIA GPU collection failed")
+	}
+	return nil
+}
+
+func cloneGPUDevices(devices []model.GPUDevice) []model.GPUDevice {
+	return append([]model.GPUDevice(nil), devices...)
+}
+
+func (p *Provider) stabilizeWSLGPU(distro *wslReport, now time.Time) bool {
+	if distro.Data.GPUOK {
+		p.previousWGPU[distro.GUID] = cachedGPUs{devices: cloneGPUDevices(distro.Data.GPUs), savedAt: now}
+		return true
+	}
+	cached, ok := p.previousWGPU[distro.GUID]
+	if !ok || now.Sub(cached.savedAt) > wslGPUGracePeriod {
+		return false
+	}
+	distro.Data.GPUs = cloneGPUDevices(cached.devices)
+	distro.Data.GPUOK = true
+	return true
 }
 
 func runWithReconnect(ctx context.Context, run func() ([]byte, error), reconnect func()) ([]byte, error) {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/LJAYi/komari-bridge/internal/config"
+	"github.com/LJAYi/komari-bridge/internal/model"
 )
 
 func TestCollect(t *testing.T) {
@@ -77,12 +79,28 @@ func TestCollect(t *testing.T) {
 	if vm.Report.RAM.Total != 1000*1024 || vm.Report.RAM.Used != 250*1024 || vm.Report.Swap.Used != 20*1024 || vm.Tags["memory_source"] != "qga_proc_meminfo" {
 		t.Fatalf("unexpected QGA memory snapshot: %#v", vm)
 	}
+	if vm.BasicInfo.DiskTotal != 0 || vm.Report.Disk != (model.Usage{}) {
+		t.Fatalf("QEMU guest disk usage should be unavailable: %#v", vm.Report.Disk)
+	}
 }
 
 func TestParseGuestMemoryRejectsMissingAvailable(t *testing.T) {
 	t.Parallel()
 	if _, err := parseGuestMemory("MemTotal: 1024 kB\n"); err == nil {
 		t.Fatal("parseGuestMemory accepted missing MemAvailable")
+	}
+}
+
+func TestParseGuestMemoryRejectsInconsistentTotals(t *testing.T) {
+	t.Parallel()
+	for _, contents := range []string{
+		"MemTotal: 1024 kB\nMemAvailable: 2048 kB\n",
+		"MemTotal: 1024 kB\nMemAvailable: 512 kB\nSwapTotal: 128 kB\n",
+		"MemTotal: 1024 kB\nMemAvailable: 512 kB\nSwapTotal: 128 kB\nSwapFree: 256 kB\n",
+	} {
+		if _, err := parseGuestMemory(contents); err == nil {
+			t.Fatalf("parseGuestMemory(%q) succeeded", contents)
+		}
 	}
 }
 
@@ -104,4 +122,209 @@ func TestCPUDisplayName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFirstNodeStatusFailureDoesNotPublishGenericCPU(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api2/json/cluster/resources" {
+			w.Write([]byte(`{"data":[{"id":"node/pve-a","type":"node","node":"pve-a","status":"online","maxcpu":128,"maxmem":1000,"maxdisk":200}]}`))
+			return
+		}
+		http.Error(w, "temporary status failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	p, err := New(config.ProxmoxConfig{ID: "site-a", Endpoint: server.URL, TokenID: "token", TokenSecret: "secret", InsecureSkipVerify: true}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Online {
+		t.Fatalf("node without status enrichment was published: %#v", snapshots)
+	}
+}
+
+func TestValidGuestOSRequiresCompleteIdentity(t *testing.T) {
+	t.Parallel()
+	var info guestOSResponse
+	info.Data.Result.Name = "Ubuntu"
+	if validGuestOS(info) {
+		t.Fatal("partial QGA OS identity was accepted")
+	}
+	info.Data.Result.Machine = "x86_64"
+	info.Data.Result.KernelRelease = "6.8.0"
+	if !validGuestOS(info) {
+		t.Fatal("complete QGA OS identity was rejected")
+	}
+}
+
+func TestQGAMemoryFirstFailureMarksSnapshotOffline(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/cluster/resources":
+			w.Write([]byte(`{"data":[{"id":"qemu/105","type":"qemu","node":"pve-a","name":"ubuntu","vmid":105,"status":"running","mem":900,"maxmem":1000}]}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/get-osinfo":
+			http.Error(w, "agent unavailable", http.StatusServiceUnavailable)
+		case "/api2/json/nodes/pve-a/qemu/105/agent/exec":
+			http.Error(w, "agent unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	p := newQGATestProvider(t, server.URL)
+	snapshots, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("got %d snapshots, want 1", len(snapshots))
+	}
+	snapshot := snapshots[0]
+	if snapshot.Online {
+		t.Fatal("snapshot is online despite required QGA memory being unavailable")
+	}
+	if snapshot.Report.RAM.Total != 0 || snapshot.Report.RAM.Used != 0 || snapshot.BasicInfo.MemoryTotal != 0 {
+		t.Fatalf("PVE memory leaked into QGA-required snapshot: %#v", snapshot)
+	}
+	if snapshot.Tags["memory_source"] != "qga_unavailable" {
+		t.Fatalf("unexpected memory source: %q", snapshot.Tags["memory_source"])
+	}
+}
+
+func TestQGAMemoryTransientFailureUsesLastKnownGood(t *testing.T) {
+	t.Parallel()
+	var fail atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/cluster/resources":
+			w.Write([]byte(`{"data":[{"id":"qemu/105","type":"qemu","node":"pve-a","name":"ubuntu","vmid":105,"status":"running","mem":999,"maxmem":1000}]}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/get-osinfo":
+			w.Write([]byte(`{"data":{"result":{"name":"Ubuntu"}}}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/exec":
+			if fail.Load() {
+				http.Error(w, "temporary QGA failure", http.StatusServiceUnavailable)
+				return
+			}
+			w.Write([]byte(`{"data":{"pid":42}}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/exec-status":
+			w.Write([]byte(`{"data":{"exited":1,"exitcode":0,"out-data":"MemTotal: 1000 kB\nMemAvailable: 750 kB\nSwapTotal: 100 kB\nSwapFree: 80 kB\n"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	p := newQGATestProvider(t, server.URL)
+	first := collectSingleSnapshot(t, p)
+	fail.Store(true)
+	second := collectSingleSnapshot(t, p)
+	if !second.Online {
+		t.Fatal("snapshot became offline despite cached QGA memory")
+	}
+	if second.Report.RAM != first.Report.RAM || second.Report.Swap != first.Report.Swap || second.BasicInfo.MemoryTotal != first.BasicInfo.MemoryTotal {
+		t.Fatalf("cached QGA memory changed: first=%#v second=%#v", first, second)
+	}
+	if second.Report.RAM.Used == 999 {
+		t.Fatal("snapshot fell back to PVE memory")
+	}
+	if second.Tags["memory_source"] != "qga_proc_meminfo_cached" {
+		t.Fatalf("unexpected memory source: %q", second.Tags["memory_source"])
+	}
+	p.cacheMu.Lock()
+	cached := p.guestMemory["qemu:105"]
+	cached.savedAt = time.Now().Add(-guestMemoryGracePeriod - time.Second)
+	p.guestMemory["qemu:105"] = cached
+	p.cacheMu.Unlock()
+	third := collectSingleSnapshot(t, p)
+	if third.Online || third.Report.RAM.Total != 0 || third.Report.RAM.Used != 0 {
+		t.Fatalf("expired QGA memory kept reporting or fell back to PVE: %#v", third)
+	}
+}
+
+func TestNodeAndGuestOSEnrichmentSurviveTransientFailure(t *testing.T) {
+	t.Parallel()
+	var fail atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/cluster/resources":
+			w.Write([]byte(`{"data":[
+				{"id":"node/pve-a","type":"node","node":"pve-a","status":"online","maxcpu":128},
+				{"id":"qemu/105","type":"qemu","node":"pve-a","name":"ubuntu","vmid":105,"status":"running","maxcpu":8}
+			]}`))
+		case "/api2/json/nodes/pve-a/status":
+			if fail.Load() {
+				http.Error(w, "temporary status failure", http.StatusServiceUnavailable)
+				return
+			}
+			w.Write([]byte(`{"data":{"cpuinfo":{"model":"AMD EPYC 9354","cpus":128,"cores":64,"sockets":2},"pveversion":"pve-manager/9.2.2","kversion":"Linux 6.8-pve"}}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/get-osinfo":
+			if fail.Load() {
+				http.Error(w, "temporary agent failure", http.StatusServiceUnavailable)
+				return
+			}
+			w.Write([]byte(`{"data":{"result":{"name":"Ubuntu","pretty-name":"Ubuntu 24.04 LTS","machine":"x86_64","kernel-release":"6.8.0"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	p, err := New(config.ProxmoxConfig{
+		ID: "site-a", Endpoint: server.URL, TokenID: "token", TokenSecret: "secret", InsecureSkipVerify: true,
+	}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail.Store(true)
+	second, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("unexpected snapshot counts: %d, %d", len(first), len(second))
+	}
+	if second[0].BasicInfo != first[0].BasicInfo {
+		t.Fatalf("node enrichment degraded: first=%#v second=%#v", first[0].BasicInfo, second[0].BasicInfo)
+	}
+	if second[1].BasicInfo.OS != first[1].BasicInfo.OS || second[1].BasicInfo.Arch != first[1].BasicInfo.Arch || second[1].BasicInfo.KernelVersion != first[1].BasicInfo.KernelVersion {
+		t.Fatalf("guest OS enrichment degraded: first=%#v second=%#v", first[1].BasicInfo, second[1].BasicInfo)
+	}
+}
+
+func newQGATestProvider(t *testing.T, endpoint string) *Provider {
+	t.Helper()
+	p, err := New(config.ProxmoxConfig{
+		ID: "site-a", Endpoint: endpoint, TokenID: "token", TokenSecret: "secret", InsecureSkipVerify: true,
+		Resources: map[string]config.ResourceOverride{"qemu:105": {GuestMemory: "qga"}},
+	}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func collectSingleSnapshot(t *testing.T, p *Provider) model.Snapshot {
+	t.Helper()
+	snapshots, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("got %d snapshots, want 1", len(snapshots))
+	}
+	return snapshots[0]
 }

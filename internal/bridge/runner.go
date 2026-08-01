@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,10 @@ func (r *Runner) Cycle(ctx context.Context) error {
 		for _, snapshot := range snapshots {
 			key := ResourceKey(snapshot.Identity)
 			if _, ok := providerTargets[key]; ok {
+				if err := validateSnapshot(snapshot); err != nil {
+					cycleErrors = append(cycleErrors, fmt.Errorf("%s %s %s: invalid authoritative snapshot: %w", p.SourceType(), p.ID(), snapshot.Identity.ExternalID, err))
+					continue
+				}
 				r.authorityCache[key] = cachedSnapshot{snapshot: snapshot, savedAt: r.now()}
 			}
 			if current, ok := merged[key]; ok {
@@ -110,11 +115,82 @@ func (r *Runner) Cycle(ctx context.Context) error {
 	}
 	r.applyMetricAuthorities(merged)
 	for _, snapshot := range merged {
+		if err := validateSnapshot(snapshot); err != nil {
+			cycleErrors = append(cycleErrors, fmt.Errorf("%s: invalid merged snapshot: %w", snapshot.Identity.ExternalID, err))
+			continue
+		}
 		if err := r.process(ctx, snapshot); err != nil {
 			cycleErrors = append(cycleErrors, fmt.Errorf("%s: %w", snapshot.Identity.ExternalID, err))
 		}
 	}
 	return errors.Join(cycleErrors...)
+}
+
+func validateSnapshot(snapshot model.Snapshot) error {
+	if !snapshot.Identity.Valid() {
+		return fmt.Errorf("invalid resource identity")
+	}
+	if !snapshot.Online {
+		return nil
+	}
+	if snapshot.BasicInfo.CPUCores < 0 || snapshot.BasicInfo.CPUPhysicalCores < 0 {
+		return fmt.Errorf("negative CPU core count")
+	}
+	if math.IsNaN(snapshot.Report.CPU.Usage) || math.IsInf(snapshot.Report.CPU.Usage, 0) || snapshot.Report.CPU.Usage < 0 || snapshot.Report.CPU.Usage > 100 {
+		return fmt.Errorf("CPU usage %.2f is outside 0..100", snapshot.Report.CPU.Usage)
+	}
+	if snapshot.BasicInfo.MemoryTotal <= 0 || snapshot.Report.RAM.Total <= 0 {
+		return fmt.Errorf("online resource has no memory total")
+	}
+	if snapshot.BasicInfo.MemoryTotal != snapshot.Report.RAM.Total {
+		return fmt.Errorf("basic memory total %d differs from report total %d", snapshot.BasicInfo.MemoryTotal, snapshot.Report.RAM.Total)
+	}
+	if err := validateUsage("memory", snapshot.Report.RAM); err != nil {
+		return err
+	}
+	if snapshot.BasicInfo.SwapTotal != snapshot.Report.Swap.Total {
+		return fmt.Errorf("basic swap total %d differs from report total %d", snapshot.BasicInfo.SwapTotal, snapshot.Report.Swap.Total)
+	}
+	if err := validateUsage("swap", snapshot.Report.Swap); err != nil {
+		return err
+	}
+	if snapshot.BasicInfo.DiskTotal != snapshot.Report.Disk.Total {
+		return fmt.Errorf("basic disk total %d differs from report total %d", snapshot.BasicInfo.DiskTotal, snapshot.Report.Disk.Total)
+	}
+	if err := validateUsage("disk", snapshot.Report.Disk); err != nil {
+		return err
+	}
+	if snapshot.Report.Uptime < 0 || snapshot.Report.Process < 0 || snapshot.Report.Connections.TCP < 0 || snapshot.Report.Connections.UDP < 0 {
+		return fmt.Errorf("negative host counter")
+	}
+	if snapshot.Report.Network.Up < 0 || snapshot.Report.Network.Down < 0 || snapshot.Report.Network.TotalUp < 0 || snapshot.Report.Network.TotalDown < 0 {
+		return fmt.Errorf("negative network counter")
+	}
+	if snapshot.Report.GPU != nil {
+		gpu := snapshot.Report.GPU
+		if gpu.Count <= 0 || gpu.Count != len(gpu.DetailedInfo) {
+			return fmt.Errorf("GPU count %d differs from %d devices", gpu.Count, len(gpu.DetailedInfo))
+		}
+		if math.IsNaN(gpu.AverageUsage) || math.IsInf(gpu.AverageUsage, 0) || gpu.AverageUsage < 0 || gpu.AverageUsage > 100 {
+			return fmt.Errorf("GPU average usage %.2f is outside 0..100", gpu.AverageUsage)
+		}
+		for index, device := range gpu.DetailedInfo {
+			if device.MemoryTotal < 0 || device.MemoryUsed < 0 || device.MemoryUsed > device.MemoryTotal {
+				return fmt.Errorf("GPU %d has invalid memory usage %d/%d", index, device.MemoryUsed, device.MemoryTotal)
+			}
+			if math.IsNaN(device.Utilization) || math.IsInf(device.Utilization, 0) || device.Utilization < 0 || device.Utilization > 100 {
+				return fmt.Errorf("GPU %d utilization %.2f is outside 0..100", index, device.Utilization)
+			}
+		}
+	}
+	return nil
+}
+
+func validateUsage(name string, usage model.Usage) error {
+	if usage.Total < 0 || usage.Used < 0 || usage.Used > usage.Total {
+		return fmt.Errorf("%s usage %d/%d is invalid", name, usage.Used, usage.Total)
+	}
+	return nil
 }
 
 func (r *Runner) applyMetricAuthorities(merged map[string]model.Snapshot) {
