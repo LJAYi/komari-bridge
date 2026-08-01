@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,7 @@ func (r *Runner) Cycle(ctx context.Context) error {
 		}
 	}
 	r.applyMetricAuthorities(merged)
+	decorateTopology(merged)
 	for _, snapshot := range merged {
 		// Komari's Version column describes the reporting client, not the
 		// observed guest or hypervisor. Set it centrally so every provider and
@@ -129,6 +131,78 @@ func (r *Runner) Cycle(ctx context.Context) error {
 		}
 	}
 	return errors.Join(cycleErrors...)
+}
+
+func decorateTopology(snapshots map[string]model.Snapshot) {
+	byExternalID := make(map[string][]model.Snapshot)
+	for _, snapshot := range snapshots {
+		byExternalID[snapshot.Identity.ExternalID] = append(byExternalID[snapshot.Identity.ExternalID], snapshot)
+	}
+	for key, snapshot := range snapshots {
+		tags := make(map[string]string, len(snapshot.Tags)+6)
+		for tag, value := range snapshot.Tags {
+			tags[tag] = value
+		}
+		tags["bridge_source_type"] = snapshot.Identity.SourceType
+		tags["bridge_source_id"] = snapshot.Identity.SourceID
+		tags["bridge_external_id"] = snapshot.Identity.ExternalID
+		tags["bridge_resource_type"] = snapshot.ResourceType
+		if snapshot.ParentExternalID != "" {
+			tags["bridge_parent_external_id"] = snapshot.ParentExternalID
+		}
+		site := topologySite(snapshot, byExternalID)
+		if site != "" {
+			tags["bridge_site"] = site
+			snapshot.BasicInfo.Group = site
+		} else {
+			snapshot.BasicInfo.Group = snapshot.Group
+		}
+		snapshot.BasicInfo.Tags = encodeTags(tags)
+		snapshots[key] = snapshot
+	}
+}
+
+func topologySite(snapshot model.Snapshot, byExternalID map[string][]model.Snapshot) string {
+	startGroup := snapshot.Group
+	current := snapshot
+	visited := make(map[string]struct{})
+	for current.ParentExternalID != "" {
+		if _, seen := visited[current.Identity.ExternalID]; seen {
+			return startGroup
+		}
+		visited[current.Identity.ExternalID] = struct{}{}
+		candidates := byExternalID[current.ParentExternalID]
+		if len(candidates) == 0 {
+			return startGroup
+		}
+		current = candidates[0]
+		for _, candidate := range candidates {
+			if startGroup != "" && candidate.Group == startGroup {
+				current = candidate
+				break
+			}
+		}
+	}
+	if current.ResourceType == "node" || current.BasicInfo.Virtualization == "pve" {
+		return strings.TrimSpace(current.Name)
+	}
+	return startGroup
+}
+
+func encodeTags(tags map[string]string) string {
+	keys := make([]string, 0, len(tags))
+	for key, value := range tags {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	replacer := strings.NewReplacer(";", ",", "\n", " ", "\r", " ")
+	for _, key := range keys {
+		parts = append(parts, replacer.Replace(key)+"="+replacer.Replace(tags[key]))
+	}
+	return strings.Join(parts, ";")
 }
 
 func snapshotCollector(snapshot model.Snapshot) string {

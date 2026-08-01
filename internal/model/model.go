@@ -29,6 +29,8 @@ type BasicInfo struct {
 	GPUName          string `json:"gpu_name"`
 	Virtualization   string `json:"virtualization"`
 	Version          string `json:"version"`
+	Group            string `json:"group,omitempty"`
+	Tags             string `json:"tags,omitempty"`
 }
 
 type Usage struct {

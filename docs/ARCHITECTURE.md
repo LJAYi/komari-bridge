@@ -37,6 +37,12 @@ The bridge currently registers virtual clients and calls only
 snapshots that use the same provider identity. It does not associate a resource
 with a client independently registered by Komari Agent.
 
+For bridge-owned virtual clients, parent and site metadata is mirrored into
+Komari's existing `group` and `tags` fields as a compatibility transport. This
+allows topology-aware themes to group PVE guests and WSL children, but it does
+not create server-side resource objects, enforce relationship integrity, or
+provide Agent identity binding.
+
 Until the server exposes topology and extension APIs, the bridge must not share
 an Agent client token or submit a second complete host report to that client.
 Doing so would make online state and metric ownership nondeterministic.

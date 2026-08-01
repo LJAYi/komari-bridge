@@ -238,6 +238,40 @@ func TestCycleReportsBridgeBuildAsClientVersion(t *testing.T) {
 	}
 }
 
+func TestDecorateTopologyPublishesSiteAndParentMetadata(t *testing.T) {
+	snapshots := map[string]model.Snapshot{
+		"pve": {
+			Identity: model.Identity{SourceType: "proxmox", SourceID: "tianjin-1", ExternalID: "node:pve"},
+			Name:     "tju-ev1", Group: "天津-1", ResourceType: "node",
+			BasicInfo: model.BasicInfo{Virtualization: "pve"},
+		},
+		"vm": {
+			Identity:         model.Identity{SourceType: "proxmox", SourceID: "tianjin-1", ExternalID: "qemu:107"},
+			ParentExternalID: "node:pve", Name: "tju-ev17", Group: "天津-1", ResourceType: "qemu",
+		},
+		"wsl": {
+			Identity:         model.Identity{SourceType: "windows_ssh", SourceID: "tju-ev17", ExternalID: "wsl:guid"},
+			ParentExternalID: "qemu:107", Name: "tju-ev15", Group: "天津-1", ResourceType: "wsl",
+		},
+	}
+
+	decorateTopology(snapshots)
+	for key, snapshot := range snapshots {
+		if snapshot.BasicInfo.Group != "tju-ev1" {
+			t.Errorf("%s group = %q, want tju-ev1", key, snapshot.BasicInfo.Group)
+		}
+		if !strings.Contains(snapshot.BasicInfo.Tags, "bridge_site=tju-ev1") || !strings.Contains(snapshot.BasicInfo.Tags, "bridge_external_id="+snapshot.Identity.ExternalID) {
+			t.Errorf("%s tags = %q", key, snapshot.BasicInfo.Tags)
+		}
+	}
+	if got := snapshots["vm"].BasicInfo.Tags; !strings.Contains(got, "bridge_parent_external_id=node:pve") || !strings.Contains(got, "bridge_resource_type=qemu") {
+		t.Fatalf("VM tags = %q", got)
+	}
+	if got := snapshots["wsl"].BasicInfo.Tags; !strings.Contains(got, "bridge_parent_external_id=qemu:107") || !strings.Contains(got, "bridge_resource_type=wsl") {
+		t.Fatalf("WSL tags = %q", got)
+	}
+}
+
 func TestInvalidAuthoritySnapshotUsesLastValidValue(t *testing.T) {
 	identity := model.Identity{SourceType: "proxmox", SourceID: "site-a", ExternalID: "qemu:107"}
 	pve, windows := authoritativeFixtures(identity)

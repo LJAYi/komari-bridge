@@ -126,6 +126,15 @@ fields exist, the bridge registers names as:
 Auto-<group> / <resource name>
 ```
 
+For current Komari releases, the bridge also publishes a compatibility view of
+its topology through the existing client `group` and `tags` fields. The group
+is the discovered root PVE node name (for example `tju-ev1`), while tags carry
+stable `bridge_external_id`, `bridge_parent_external_id`,
+`bridge_resource_type`, and `bridge_site` values. Themes can use these fields
+to render sites and direct guest counts without parsing display names. This is
+display metadata only; it does not replace the server-owned external-resource
+and Agent-binding API proposed in the RFC.
+
 ## Proxmox permissions
 
 Use a dedicated PVE account and API token with `PVEAuditor` access. Never reuse
