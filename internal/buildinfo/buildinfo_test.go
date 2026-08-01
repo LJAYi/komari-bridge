@@ -21,3 +21,19 @@ func TestWrite(t *testing.T) {
 		t.Fatalf("unexpected version output:\n%s\nwant:\n%s", output.String(), want)
 	}
 }
+
+func TestClientVersion(t *testing.T) {
+	oldVersion, oldCommit := Version, Commit
+	t.Cleanup(func() { Version, Commit = oldVersion, oldCommit })
+
+	Version = "v0.2.0-dev"
+	Commit = "bf27876abcdef"
+	if got, want := ClientVersion("windows_ssh"), "komari-bridge v0.2.0-dev (bf27876) / windows-ssh"; got != want {
+		t.Fatalf("ClientVersion() = %q, want %q", got, want)
+	}
+
+	Commit = "unknown"
+	if got, want := ClientVersion(""), "komari-bridge v0.2.0-dev"; got != want {
+		t.Fatalf("ClientVersion() without build metadata = %q, want %q", got, want)
+	}
+}

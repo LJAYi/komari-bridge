@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LJAYi/komari-bridge/internal/buildinfo"
 	"github.com/LJAYi/komari-bridge/internal/komari"
 	"github.com/LJAYi/komari-bridge/internal/model"
 	"github.com/LJAYi/komari-bridge/internal/provider"
@@ -115,6 +116,10 @@ func (r *Runner) Cycle(ctx context.Context) error {
 	}
 	r.applyMetricAuthorities(merged)
 	for _, snapshot := range merged {
+		// Komari's Version column describes the reporting client, not the
+		// observed guest or hypervisor. Set it centrally so every provider and
+		// merged snapshot exposes the exact bridge build that submitted it.
+		snapshot.BasicInfo.Version = buildinfo.ClientVersion(snapshotCollector(snapshot))
 		if err := validateSnapshot(snapshot); err != nil {
 			cycleErrors = append(cycleErrors, fmt.Errorf("%s: invalid merged snapshot: %w", snapshot.Identity.ExternalID, err))
 			continue
@@ -124,6 +129,16 @@ func (r *Runner) Cycle(ctx context.Context) error {
 		}
 	}
 	return errors.Join(cycleErrors...)
+}
+
+func snapshotCollector(snapshot model.Snapshot) string {
+	if source := snapshot.Tags["metrics_source"]; source != "" {
+		return source
+	}
+	if source := snapshot.Tags["source"]; source != "" {
+		return source
+	}
+	return snapshot.Identity.SourceType
 }
 
 func validateSnapshot(snapshot model.Snapshot) error {

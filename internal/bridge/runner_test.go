@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LJAYi/komari-bridge/internal/buildinfo"
 	"github.com/LJAYi/komari-bridge/internal/komari"
 	"github.com/LJAYi/komari-bridge/internal/model"
 	"github.com/LJAYi/komari-bridge/internal/provider"
@@ -206,6 +207,34 @@ func TestBasicInfoUploadsAgainOnlyWhenContentChanges(t *testing.T) {
 	}
 	if len(infos) != 2 || infos[1].DiskTotal != infos[0].DiskTotal+1 {
 		t.Fatalf("basic info uploads = %#v", infos)
+	}
+}
+
+func TestCycleReportsBridgeBuildAsClientVersion(t *testing.T) {
+	oldVersion, oldCommit := buildinfo.Version, buildinfo.Commit
+	t.Cleanup(func() { buildinfo.Version, buildinfo.Commit = oldVersion, oldCommit })
+	buildinfo.Version, buildinfo.Commit = "v0.2.0", "1234567890"
+
+	identity := model.Identity{SourceType: "proxmox", SourceID: "site-a", ExternalID: "qemu:107"}
+	_, snapshot := authoritativeFixtures(identity)
+	snapshot.Tags = map[string]string{"metrics_source": "windows_ssh"}
+	snapshot.BasicInfo.Version = "Windows 11"
+	source := &scriptedProvider{id: "only", sourceType: "test", collect: func() ([]model.Snapshot, error) {
+		return []model.Snapshot{snapshot}, nil
+	}}
+	recorder := &rpcRecorder{}
+	runner, closeRunner := newTestRunner(t, []provider.Provider{source}, recorder)
+	defer closeRunner()
+
+	if err := runner.Cycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, infos := recorder.snapshot()
+	if len(infos) != 1 {
+		t.Fatalf("basic info uploads = %#v", infos)
+	}
+	if got, want := infos[0].Version, "komari-bridge v0.2.0 (1234567) / windows-ssh"; got != want {
+		t.Fatalf("client version = %q, want %q", got, want)
 	}
 }
 
