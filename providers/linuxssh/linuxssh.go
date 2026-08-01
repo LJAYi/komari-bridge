@@ -106,6 +106,17 @@ func authMethods(cfg config.LinuxSSHConfig) ([]ssh.AuthMethod, error) {
 func (p *Provider) ID() string         { return p.cfg.ID }
 func (p *Provider) SourceType() string { return p.sourceType }
 
+func (p *Provider) MetricTargets() []model.Identity {
+	if p.slurmOnly || p.cfg.AttachTo.SourceType == "" {
+		return nil
+	}
+	return []model.Identity{{
+		SourceType: p.cfg.AttachTo.SourceType,
+		SourceID:   p.cfg.AttachTo.SourceID,
+		ExternalID: p.cfg.AttachTo.ExternalID,
+	}}
+}
+
 type remoteReport struct {
 	CPUName          string            `json:"cpu_name"`
 	CPUCores         int               `json:"cpu_cores"`

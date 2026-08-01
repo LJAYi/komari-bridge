@@ -1,12 +1,47 @@
 package windowsssh
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/LJAYi/komari-bridge/internal/config"
 )
+
+func TestRunWithReconnectRetriesOnceAfterTransportFailure(t *testing.T) {
+	t.Parallel()
+	attempts, reconnects := 0, 0
+	output, err := runWithReconnect(context.Background(), func() ([]byte, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("remote command exited without exit status")
+		}
+		return []byte("recovered"), nil
+	}, func() { reconnects++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "recovered" || attempts != 2 || reconnects != 1 {
+		t.Fatalf("output=%q attempts=%d reconnects=%d", output, attempts, reconnects)
+	}
+}
+
+func TestRunWithReconnectDoesNotRetryCancellation(t *testing.T) {
+	t.Parallel()
+	attempts, reconnects := 0, 0
+	_, err := runWithReconnect(context.Background(), func() ([]byte, error) {
+		attempts++
+		return nil, context.Canceled
+	}, func() { reconnects++ })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	if attempts != 1 || reconnects != 0 {
+		t.Fatalf("attempts=%d reconnects=%d", attempts, reconnects)
+	}
+}
 
 func TestWSLConstructorDoesNotEmitWindowsHost(t *testing.T) {
 	t.Parallel()

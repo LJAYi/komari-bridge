@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -158,10 +159,23 @@ func authMethods(cfg config.WindowsSSHConfig) ([]ssh.AuthMethod, error) {
 func (p *Provider) ID() string         { return p.cfg.ID }
 func (p *Provider) SourceType() string { return p.sourceType }
 
+func (p *Provider) MetricTargets() []model.Identity {
+	if !p.emitHost || p.cfg.AttachTo.SourceType == "" {
+		return nil
+	}
+	return []model.Identity{{
+		SourceType: p.cfg.AttachTo.SourceType,
+		SourceID:   p.cfg.AttachTo.SourceID,
+		ExternalID: p.cfg.AttachTo.ExternalID,
+	}}
+}
+
 func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	output, err := p.run(ctx, collectorScript(p.emitHost))
+	output, err := runWithReconnect(ctx, func() ([]byte, error) {
+		return p.run(ctx, collectorScript(p.emitHost))
+	}, p.closeLocked)
 	if err != nil {
 		p.closeLocked()
 		return nil, err
@@ -230,6 +244,18 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		}
 	}
 	return snapshots, nil
+}
+
+func runWithReconnect(ctx context.Context, run func() ([]byte, error), reconnect func()) ([]byte, error) {
+	output, err := run()
+	if err == nil {
+		return output, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return nil, err
+	}
+	reconnect()
+	return run()
 }
 
 func decodeCollectorOutput(output []byte) (collectorOutput, error) {

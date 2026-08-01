@@ -86,6 +86,14 @@ metrics without creating a duplicate virtual client. This is
 provider-to-provider merging inside the bridge; it cannot bind a resource to
 an independently registered Komari Agent UUID.
 
+An attached guest collector is authoritative for CPU, memory, disk, and basic
+host information. If its first collection fails, the bridge suppresses the
+hypervisor report instead of mixing PVE totals with guest-side usage. After a
+successful collection, the last guest snapshot is reused for up to 60 seconds
+during transient failures; after that, reporting stops and Komari's presence
+TTL marks the client offline. Changed basic information is uploaded again, so
+guest-visible memory or disk totals can replace an earlier value.
+
 Do not configure the bridge and an Agent to submit complete host reports with
 the same client token. Safe Agent binding requires upstream topology and
 extension-metric APIs. See

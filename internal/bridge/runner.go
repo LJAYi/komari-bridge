@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,15 +23,41 @@ type Runner struct {
 	providers []provider.Provider
 	log       *slog.Logger
 
-	basicMu       sync.Mutex
-	basicUploaded map[string]bool
+	basicMu         sync.Mutex
+	basicInfoHashes map[string][sha256.Size]byte
+
+	authoritativeTargets map[string]struct{}
+	authorityCache       map[string]cachedSnapshot
+	authorityGracePeriod time.Duration
+	now                  func() time.Time
+}
+
+type cachedSnapshot struct {
+	snapshot model.Snapshot
+	savedAt  time.Time
 }
 
 func NewRunner(s *store.Store, k *komari.Client, providers []provider.Provider, logger *slog.Logger) *Runner {
-	return &Runner{
+	runner := &Runner{
 		store: s, komari: k, providers: providers, log: logger,
-		basicUploaded: make(map[string]bool),
+		basicInfoHashes:      make(map[string][sha256.Size]byte),
+		authoritativeTargets: make(map[string]struct{}),
+		authorityCache:       make(map[string]cachedSnapshot),
+		authorityGracePeriod: time.Minute,
+		now:                  time.Now,
 	}
+	for _, p := range providers {
+		authority, ok := p.(provider.MetricAuthority)
+		if !ok {
+			continue
+		}
+		for _, target := range authority.MetricTargets() {
+			if target.Valid() {
+				runner.authoritativeTargets[ResourceKey(target)] = struct{}{}
+			}
+		}
+	}
+	return runner
 }
 
 func (r *Runner) Run(ctx context.Context, interval time.Duration) error {
@@ -54,6 +82,14 @@ func (r *Runner) Cycle(ctx context.Context) error {
 	var cycleErrors []error
 	merged := make(map[string]model.Snapshot)
 	for _, p := range r.providers {
+		providerTargets := make(map[string]struct{})
+		if authority, ok := p.(provider.MetricAuthority); ok {
+			for _, target := range authority.MetricTargets() {
+				if target.Valid() {
+					providerTargets[ResourceKey(target)] = struct{}{}
+				}
+			}
+		}
 		snapshots, err := p.Collect(ctx)
 		if err != nil {
 			cycleErrors = append(cycleErrors, fmt.Errorf("%s %s: %w", p.SourceType(), p.ID(), err))
@@ -62,6 +98,9 @@ func (r *Runner) Cycle(ctx context.Context) error {
 		r.log.Info("provider collection complete", "type", p.SourceType(), "id", p.ID(), "resources", len(snapshots))
 		for _, snapshot := range snapshots {
 			key := ResourceKey(snapshot.Identity)
+			if _, ok := providerTargets[key]; ok {
+				r.authorityCache[key] = cachedSnapshot{snapshot: snapshot, savedAt: r.now()}
+			}
 			if current, ok := merged[key]; ok {
 				merged[key] = mergeSnapshots(current, snapshot)
 			} else {
@@ -69,12 +108,29 @@ func (r *Runner) Cycle(ctx context.Context) error {
 			}
 		}
 	}
+	r.applyMetricAuthorities(merged)
 	for _, snapshot := range merged {
 		if err := r.process(ctx, snapshot); err != nil {
 			cycleErrors = append(cycleErrors, fmt.Errorf("%s: %w", snapshot.Identity.ExternalID, err))
 		}
 	}
 	return errors.Join(cycleErrors...)
+}
+
+func (r *Runner) applyMetricAuthorities(merged map[string]model.Snapshot) {
+	now := r.now()
+	for key := range r.authoritativeTargets {
+		cached, ok := r.authorityCache[key]
+		if !ok || now.Sub(cached.savedAt) > r.authorityGracePeriod {
+			delete(merged, key)
+			continue
+		}
+		if current, ok := merged[key]; ok {
+			merged[key] = mergeSnapshots(current, cached.snapshot)
+		} else {
+			merged[key] = cached.snapshot
+		}
+	}
 }
 
 func mergeSnapshots(a, b model.Snapshot) model.Snapshot {
@@ -145,28 +201,41 @@ func (r *Runner) process(ctx context.Context, snapshot model.Snapshot) error {
 	if !snapshot.Online {
 		return nil
 	}
-	if !r.wasBasicUploaded(binding.KomariUUID) {
+	basicHash, err := hashBasicInfo(snapshot.BasicInfo)
+	if err != nil {
+		return err
+	}
+	if !r.isCurrentBasicInfo(binding.KomariUUID, basicHash) {
 		if err := r.komari.UploadBasicInfo(ctx, binding.Token, snapshot.BasicInfo); err != nil {
 			return err
 		}
-		r.markBasicUploaded(binding.KomariUUID)
+		r.markBasicInfo(binding.KomariUUID, basicHash)
 	}
 	if err := r.komari.Report(ctx, binding.Token, snapshot.Report); err != nil {
 		return err
 	}
-	return r.store.MarkReported(ctx, snapshot.Identity, time.Now())
+	return r.store.MarkReported(ctx, snapshot.Identity, r.now())
 }
 
-func (r *Runner) wasBasicUploaded(uuid string) bool {
-	r.basicMu.Lock()
-	defer r.basicMu.Unlock()
-	return r.basicUploaded[uuid]
+func hashBasicInfo(info model.BasicInfo) ([sha256.Size]byte, error) {
+	payload, err := json.Marshal(info)
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("encode basic info: %w", err)
+	}
+	return sha256.Sum256(payload), nil
 }
 
-func (r *Runner) markBasicUploaded(uuid string) {
+func (r *Runner) isCurrentBasicInfo(uuid string, hash [sha256.Size]byte) bool {
 	r.basicMu.Lock()
 	defer r.basicMu.Unlock()
-	r.basicUploaded[uuid] = true
+	current, ok := r.basicInfoHashes[uuid]
+	return ok && current == hash
+}
+
+func (r *Runner) markBasicInfo(uuid string, hash [sha256.Size]byte) {
+	r.basicMu.Lock()
+	defer r.basicMu.Unlock()
+	r.basicInfoHashes[uuid] = hash
 }
 
 func ResourceKey(identity model.Identity) string {
