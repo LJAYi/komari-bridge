@@ -36,6 +36,33 @@ providers:
           # QEMU process memory observed by PVE.
           guest_memory: qga
 
+  # Discovers containers through the Docker Engine API. Compose and Swarm
+  # workloads are recognized from Docker's standard labels and receive stable
+  # logical identities across container/task recreation.
+  docker:
+    - id: nas-a-docker
+      # For a bridge running on the Docker host. Access to this socket is
+      # effectively root-equivalent; prefer a tightly scoped socket proxy.
+      endpoint: unix:///var/run/docker.sock
+      group: Lab A
+      # Safe default: only containers with label
+      # komari.bridge.monitor=true are registered. Set true to include every
+      # matching running container on this engine.
+      include_all: false
+      include_stopped: false
+      attach_to:
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:100
+
+    # Remote engines should use mutual TLS. Plain tcp/http endpoints are
+    # rejected unless insecure_allow_http is explicitly enabled.
+    # - id: remote-docker
+    #   endpoint: https://docker.example.internal:2376
+    #   tls_ca_file: /run/secrets/docker_ca.pem
+    #   tls_cert_file: /run/secrets/docker_client.pem
+    #   tls_key_file: /run/secrets/docker_client_key.pem
+
   # Optional fallback for systems where Komari Agent cannot be installed.
   # Do not use this as the default host collector.
   agentless_ssh:

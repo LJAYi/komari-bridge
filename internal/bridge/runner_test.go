@@ -253,6 +253,10 @@ func TestDecorateTopologyPublishesSiteAndParentMetadata(t *testing.T) {
 			Identity:         model.Identity{SourceType: "windows_ssh", SourceID: "tju-ev17", ExternalID: "wsl:guid"},
 			ParentExternalID: "qemu:107", Name: "tju-ev15", Group: "天津-1", ResourceType: "wsl",
 		},
+		"docker": {
+			Identity:         model.Identity{SourceType: "docker", SourceID: "tju-ev10", ExternalID: "compose:komari:web:1"},
+			ParentExternalID: "qemu:107", Name: "komari / web", Group: "天津-1", ResourceType: "docker_compose_container",
+		},
 	}
 
 	decorateTopology(snapshots)
@@ -269,6 +273,9 @@ func TestDecorateTopologyPublishesSiteAndParentMetadata(t *testing.T) {
 	}
 	if got := snapshots["wsl"].BasicInfo.Tags; !strings.Contains(got, "bridge_parent_external_id=qemu:107") || !strings.Contains(got, "bridge_resource_type=wsl") {
 		t.Fatalf("WSL tags = %q", got)
+	}
+	if got := snapshots["docker"].BasicInfo.Tags; !strings.Contains(got, "bridge_parent_external_id=qemu:107") || !strings.Contains(got, "bridge_resource_type=docker_compose_container") {
+		t.Fatalf("Docker tags = %q", got)
 	}
 }
 

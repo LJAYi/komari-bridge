@@ -14,6 +14,7 @@ import (
 func TestRegisterAndReport(t *testing.T) {
 	t.Parallel()
 	methods := make(chan string, 2)
+	mountCounts := make(chan int, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/clients/register":
@@ -29,11 +30,19 @@ func TestRegisterAndReport(t *testing.T) {
 			}
 			var request struct {
 				Method string `json:"method"`
+				Params struct {
+					Report struct {
+						Disks []model.DiskMount `json:"disks"`
+					} `json:"report"`
+				} `json:"params"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Error(err)
 			}
 			methods <- request.Method
+			if request.Method == "agent.report" {
+				mountCounts <- len(request.Params.Report.Disks)
+			}
 			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "result": map[string]any{}})
 		default:
 			http.NotFound(w, r)
@@ -52,7 +61,7 @@ func TestRegisterAndReport(t *testing.T) {
 	if err := client.UploadBasicInfo(context.Background(), token, model.BasicInfo{OS: "PVE"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Report(context.Background(), token, model.Report{}); err != nil {
+	if err := client.Report(context.Background(), token, model.Report{Disks: []model.DiskMount{{Mountpoint: "/", Total: 100, Used: 40}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-methods; got != "agent.basicInfo" {
@@ -60,5 +69,8 @@ func TestRegisterAndReport(t *testing.T) {
 	}
 	if got := <-methods; got != "agent.report" {
 		t.Fatalf("second method = %q", got)
+	}
+	if got := <-mountCounts; got != 1 {
+		t.Fatalf("reported mount count = %d, want 1", got)
 	}
 }

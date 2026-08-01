@@ -38,6 +38,18 @@ type Usage struct {
 	Used  int64 `json:"used"`
 }
 
+// DiskMount is an extension field carried by komari-bridge reports. Current
+// Komari releases ignore unknown report fields; keeping the shape explicit here
+// makes the bridge wire-compatible with a future server-side mountpoint API.
+type DiskMount struct {
+	Name       string `json:"name,omitempty"`
+	Mountpoint string `json:"mountpoint"`
+	Filesystem string `json:"filesystem,omitempty"`
+	Device     string `json:"device,omitempty"`
+	Total      int64  `json:"total"`
+	Used       int64  `json:"used"`
+}
+
 type CPUReport struct {
 	Name  string  `json:"name,omitempty"`
 	Cores int     `json:"cores,omitempty"`
@@ -84,6 +96,7 @@ type Report struct {
 	Swap        Usage             `json:"swap"`
 	Load        LoadReport        `json:"load"`
 	Disk        Usage             `json:"disk"`
+	Disks       []DiskMount       `json:"disks,omitempty"`
 	Network     NetworkReport     `json:"network"`
 	Connections ConnectionsReport `json:"connections"`
 	GPU         *GPUReport        `json:"gpu,omitempty"`

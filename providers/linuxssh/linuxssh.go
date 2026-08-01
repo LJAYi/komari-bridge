@@ -129,6 +129,7 @@ type remoteReport struct {
 	Load             []float64         `json:"load"`
 	DiskTotal        int64             `json:"disk_total"`
 	DiskUsed         int64             `json:"disk_used"`
+	Disks            []model.DiskMount `json:"disks"`
 	Network          networkCounters   `json:"network"`
 	TCP              int               `json:"tcp"`
 	UDP              int               `json:"udp"`
@@ -200,6 +201,7 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		RAM:         model.Usage{Total: memTotal, Used: clampUsed(memTotal, memAvailable)},
 		Swap:        model.Usage{Total: swapTotal, Used: clampUsed(swapTotal, swapFree)},
 		Disk:        model.Usage{Total: raw.DiskTotal, Used: raw.DiskUsed},
+		Disks:       raw.Disks,
 		Network:     model.NetworkReport{Up: netUp, Down: netDown, TotalUp: int64(raw.Network.Up), TotalDown: int64(raw.Network.Down)},
 		Connections: model.ConnectionsReport{TCP: raw.TCP, UDP: raw.UDP},
 		Uptime:      raw.Uptime, Process: raw.Processes,

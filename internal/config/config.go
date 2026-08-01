@@ -49,6 +49,7 @@ type SchedulerConfig struct {
 
 type ProvidersConfig struct {
 	Proxmox      []ProxmoxConfig    `yaml:"proxmox"`
+	Docker       []DockerConfig     `yaml:"docker"`
 	AgentlessSSH []LinuxSSHConfig   `yaml:"agentless_ssh"`
 	Slurm        []LinuxSSHConfig   `yaml:"slurm"`
 	WindowsWSL   []WindowsSSHConfig `yaml:"windows_wsl"`
@@ -57,6 +58,20 @@ type ProvidersConfig struct {
 	// should use the capability-oriented provider names above.
 	LinuxSSH   []LinuxSSHConfig   `yaml:"linux_ssh"`
 	WindowsSSH []WindowsSSHConfig `yaml:"windows_ssh"`
+}
+
+type DockerConfig struct {
+	ID                 string           `yaml:"id"`
+	Endpoint           string           `yaml:"endpoint"`
+	Group              string           `yaml:"group"`
+	AttachTo           ResourceIdentity `yaml:"attach_to"`
+	IncludeAll         bool             `yaml:"include_all"`
+	IncludeStopped     bool             `yaml:"include_stopped"`
+	InsecureAllowHTTP  bool             `yaml:"insecure_allow_http"`
+	InsecureSkipVerify bool             `yaml:"insecure_skip_verify"`
+	TLSCAFile          string           `yaml:"tls_ca_file"`
+	TLSCertFile        string           `yaml:"tls_cert_file"`
+	TLSKeyFile         string           `yaml:"tls_key_file"`
 }
 
 type ResourceOverride struct {
@@ -147,6 +162,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Scheduler.Interval.Duration == 0 {
 		cfg.Scheduler.Interval.Duration = 20 * time.Second
 	}
+	for i := range cfg.Providers.Docker {
+		if cfg.Providers.Docker[i].Endpoint == "" {
+			cfg.Providers.Docker[i].Endpoint = "unix:///var/run/docker.sock"
+		}
+	}
 }
 
 func validate(cfg Config) error {
@@ -164,6 +184,18 @@ func validate(cfg Config) error {
 			if resource.GuestMemory != "" && !strings.EqualFold(resource.GuestMemory, "qga") {
 				return fmt.Errorf("providers.proxmox[%d].resources[%q]: guest_memory must be qga", i, externalID)
 			}
+		}
+	}
+	for i, docker := range cfg.Providers.Docker {
+		if strings.TrimSpace(docker.ID) == "" || strings.TrimSpace(docker.Endpoint) == "" {
+			return fmt.Errorf("providers.docker[%d]: id and endpoint are required", i)
+		}
+		attached := docker.AttachTo.SourceType != "" || docker.AttachTo.SourceID != "" || docker.AttachTo.ExternalID != ""
+		if attached && (docker.AttachTo.SourceType == "" || docker.AttachTo.SourceID == "" || docker.AttachTo.ExternalID == "") {
+			return fmt.Errorf("providers.docker[%d].attach_to must contain source_type, source_id, and external_id", i)
+		}
+		if (docker.TLSCertFile == "") != (docker.TLSKeyFile == "") {
+			return fmt.Errorf("providers.docker[%d]: tls_cert_file and tls_key_file must be configured together", i)
 		}
 	}
 	linuxProviders := []struct {

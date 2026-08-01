@@ -72,6 +72,7 @@ $cpuPhysical = 0
 $operatingSystem = $null
 $diskTotal = [int64]0
 $diskFree = [int64]0
+$diskMounts = @()
 $netUp = [int64]0
 $netDown = [int64]0
 $cpuUsage = [double]0
@@ -87,6 +88,16 @@ if (__COLLECT_WINDOWS__) {
     $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")
     $diskTotal = [int64](($logicalDisks | Measure-Object -Property Size -Sum).Sum)
     $diskFree = [int64](($logicalDisks | Measure-Object -Property FreeSpace -Sum).Sum)
+    $diskMounts = @($logicalDisks | ForEach-Object {
+        [pscustomobject]@{
+            name = [string]$_.DeviceID
+            mountpoint = [string]$_.DeviceID
+            filesystem = [string]$_.FileSystem
+            device = [string]$_.DeviceID
+            total = [int64]$_.Size
+            used = [int64]([int64]$_.Size - [int64]$_.FreeSpace)
+        }
+    })
     try {
         $statistics = @(Get-NetAdapterStatistics -ErrorAction Stop)
         $netUp = [int64](($statistics | Measure-Object -Property SentBytes -Sum).Sum)
@@ -152,6 +163,7 @@ try {
         memory_free = $memoryFree
         disk_total = $diskTotal
         disk_free = $diskFree
+        disks = @($diskMounts)
         network_up = $netUp
         network_down = $netDown
         uptime = $uptime
@@ -217,19 +229,22 @@ def memory_info():
     return result
 
 def disk_info():
-    output = command(["df", "-B1", "-P", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs", "-x", "overlay"])
+    output = command(["df", "-B1", "-P", "-T", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs", "-x", "overlay"])
     total = used = 0
     seen = set()
+    mounts = []
     for line in output.splitlines()[1:]:
         fields = line.split()
-        if len(fields) < 6 or fields[0] in seen:
+        if len(fields) < 7 or fields[0] in seen:
             continue
         seen.add(fields[0])
         try:
-            total += int(fields[1]); used += int(fields[2])
+            mount_total = int(fields[2]); mount_used = int(fields[3])
+            total += mount_total; used += mount_used
+            mounts.append({"name": fields[0], "device": fields[0], "filesystem": fields[1], "mountpoint": fields[6], "total": mount_total, "used": mount_used})
         except ValueError:
             pass
-    return total, used
+    return total, used, mounts
 
 def network_info():
     up = down = 0
@@ -265,7 +280,7 @@ def gpu_info():
     return True, result
 
 cpu_name, cpu_cores, physical_cores, cpu = cpu_info()
-disk_total, disk_used = disk_info()
+disk_total, disk_used, disks = disk_info()
 gpu_ok, gpus = gpu_info()
 try:
     uptime = int(float(open("/proc/uptime", encoding="utf-8").read().split()[0]))
@@ -276,5 +291,5 @@ try:
 except OSError:
     processes = 0
 
-print(json.dumps({"cpu_name": cpu_name, "cpu_cores": cpu_cores, "cpu_physical_cores": physical_cores, "arch": platform.machine(), "os": os_release(), "kernel": platform.release(), "cpu": cpu, "memory": memory_info(), "load": list(os.getloadavg()), "disk_total": disk_total, "disk_used": disk_used, "network": network_info(), "uptime": uptime, "processes": processes, "gpus": gpus, "gpu_ok": gpu_ok}, separators=(",", ":")))
+print(json.dumps({"cpu_name": cpu_name, "cpu_cores": cpu_cores, "cpu_physical_cores": physical_cores, "arch": platform.machine(), "os": os_release(), "kernel": platform.release(), "cpu": cpu, "memory": memory_info(), "load": list(os.getloadavg()), "disk_total": disk_total, "disk_used": disk_used, "disks": disks, "network": network_info(), "uptime": uptime, "processes": processes, "gpus": gpus, "gpu_ok": gpu_ok}, separators=(",", ":")))
 `

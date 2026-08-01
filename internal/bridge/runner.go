@@ -249,6 +249,14 @@ func validateSnapshot(snapshot model.Snapshot) error {
 	if err := validateUsage("disk", snapshot.Report.Disk); err != nil {
 		return err
 	}
+	for index, mount := range snapshot.Report.Disks {
+		if strings.TrimSpace(mount.Mountpoint) == "" {
+			return fmt.Errorf("disk mount %d has no mountpoint", index)
+		}
+		if err := validateUsage("disk mount "+mount.Mountpoint, model.Usage{Total: mount.Total, Used: mount.Used}); err != nil {
+			return err
+		}
+	}
 	if snapshot.Report.Uptime < 0 || snapshot.Report.Process < 0 || snapshot.Report.Connections.TCP < 0 || snapshot.Report.Connections.UDP < 0 {
 		return fmt.Errorf("negative host counter")
 	}

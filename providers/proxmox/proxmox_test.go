@@ -35,7 +35,7 @@ func TestCollect(t *testing.T) {
 			w.Write([]byte(`{"data":{"result":{"name":"Ubuntu","pretty-name":"Ubuntu 24.04.4 LTS","machine":"x86_64","kernel-release":"6.8.0"}}}`))
 		case "/api2/json/nodes/pve-a/qemu/105/agent/get-fsinfo":
 			w.Write([]byte(`{"data":{"result":[
-              {"name":"sda1","mountpoint":"/","type":"ext4","total-bytes":1000,"used-bytes":400},
+              {"name":"sda1","mountpoint":"/","type":"ext4","total-bytes":1000,"used-bytes":400,"disk":[{"dev":"/dev/sda1","serial":"drive-scsi0"}]},
               {"name":"sdb1","mountpoint":"/data","type":"xfs","total-bytes":4000,"used-bytes":1000}
             ]}}`))
 		case "/api2/json/nodes/pve-a/qemu/105/agent/exec":
@@ -87,6 +87,9 @@ func TestCollect(t *testing.T) {
 	if vm.BasicInfo.DiskTotal != 5000 || vm.Report.Disk != (model.Usage{Total: 5000, Used: 1400}) || vm.Tags["disk_source"] != "qga_get_fsinfo" {
 		t.Fatalf("unexpected QGA guest disk usage: %#v", vm)
 	}
+	if len(vm.Report.Disks) != 2 || vm.Report.Disks[0].Mountpoint != "/" || vm.Report.Disks[0].Device != "/dev/sda1" || vm.Report.Disks[1].Mountpoint != "/data" {
+		t.Fatalf("unexpected QGA mountpoint report: %#v", vm.Report.Disks)
+	}
 }
 
 func TestSummarizeGuestFilesystems(t *testing.T) {
@@ -100,7 +103,7 @@ func TestSummarizeGuestFilesystems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if disk != (guestDisk{Total: 3000, Used: 700}) {
+	if disk.Total != 3000 || disk.Used != 700 || len(disk.Mounts) != 2 || disk.Mounts[0].Mountpoint != "/" || disk.Mounts[1].Mountpoint != "/overlay" {
 		t.Fatalf("unexpected filesystem summary: %#v", disk)
 	}
 }

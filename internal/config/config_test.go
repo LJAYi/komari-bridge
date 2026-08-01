@@ -63,6 +63,12 @@ komari:
   endpoint: https://komari.example.com
   auto_discovery_key: 123456789012
 providers:
+  docker:
+    - id: engine-a
+      attach_to:
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:100
   agentless_ssh:
     - id: appliance-a
       address: appliance-a.example.internal:22
@@ -89,8 +95,28 @@ providers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Providers.AgentlessSSH) != 1 || len(cfg.Providers.Slurm) != 1 || len(cfg.Providers.WindowsWSL) != 1 {
+	if len(cfg.Providers.Docker) != 1 || cfg.Providers.Docker[0].Endpoint != "unix:///var/run/docker.sock" || len(cfg.Providers.AgentlessSSH) != 1 || len(cfg.Providers.Slurm) != 1 || len(cfg.Providers.WindowsWSL) != 1 {
 		t.Fatalf("unexpected providers: %#v", cfg.Providers)
+	}
+}
+
+func TestDockerRejectsPartialParentIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `
+komari:
+  endpoint: https://komari.example.com
+  auto_discovery_key: 123456789012
+providers:
+  docker:
+    - id: engine-a
+      attach_to:
+        external_id: qemu:100
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "attach_to") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }
 

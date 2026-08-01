@@ -70,6 +70,7 @@ type windowsReport struct {
 	MemoryFree       int64             `json:"memory_free"`
 	DiskTotal        int64             `json:"disk_total"`
 	DiskFree         int64             `json:"disk_free"`
+	Disks            []model.DiskMount `json:"disks"`
 	NetworkUp        uint64            `json:"network_up"`
 	NetworkDown      uint64            `json:"network_down"`
 	Uptime           int64             `json:"uptime"`
@@ -99,6 +100,7 @@ type wslData struct {
 	Load             []float64         `json:"load"`
 	DiskTotal        int64             `json:"disk_total"`
 	DiskUsed         int64             `json:"disk_used"`
+	Disks            []model.DiskMount `json:"disks"`
 	Network          networkCounters   `json:"network"`
 	Uptime           int64             `json:"uptime"`
 	Processes        int               `json:"processes"`
@@ -248,6 +250,7 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 		CPU:     model.CPUReport{Name: raw.Windows.CPUName, Cores: raw.Windows.CPUCores, Arch: raw.Windows.Arch, Usage: raw.Windows.CPUUsage},
 		RAM:     model.Usage{Total: raw.Windows.MemoryTotal, Used: clampUsed(raw.Windows.MemoryTotal, raw.Windows.MemoryFree)},
 		Disk:    model.Usage{Total: raw.Windows.DiskTotal, Used: clampUsed(raw.Windows.DiskTotal, raw.Windows.DiskFree)},
+		Disks:   raw.Windows.Disks,
 		Network: model.NetworkReport{Up: netUp, Down: netDown, TotalUp: int64(raw.Windows.NetworkUp), TotalDown: int64(raw.Windows.NetworkDown)},
 		Uptime:  raw.Windows.Uptime, Process: raw.Windows.Processes,
 	}
@@ -409,6 +412,7 @@ func (p *Provider) wslSnapshot(raw wslReport, now time.Time) model.Snapshot {
 		RAM:     model.Usage{Total: memTotal, Used: clampUsed(memTotal, memAvailable)},
 		Swap:    model.Usage{Total: swapTotal, Used: clampUsed(swapTotal, swapFree)},
 		Disk:    model.Usage{Total: data.DiskTotal, Used: data.DiskUsed},
+		Disks:   data.Disks,
 		Network: model.NetworkReport{Up: netUp, Down: netDown, TotalUp: int64(data.Network.Up), TotalDown: int64(data.Network.Down)},
 		Uptime:  data.Uptime, Process: data.Processes,
 	}

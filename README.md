@@ -13,6 +13,7 @@ support are intended to be proposed upstream after validation here.
 ## Features
 
 - Proxmox VE node, QEMU VM, and LXC discovery
+- Docker Engine container discovery with Compose and Swarm classification
 - Durable SQLite mappings between provider identities and Komari clients
 - Komari automatic registration and HTTP v2 JSON-RPC reporting
 - Guest OS discovery through the QEMU Guest Agent
@@ -85,12 +86,13 @@ Komari Agent                 komari-bridge
 Host CPU/RAM/disk/network    Proxmox node, VM, and LXC discovery
 Host OS and virtualization   Windows to WSL discovery
 NVIDIA and AMD GPU metrics   Slurm extension metrics
-Terminal, tasks, and ping    Agentless SSH only as a fallback
+Terminal, tasks, and ping    Docker child workload discovery
+                             Agentless SSH only as a fallback
 ```
 
-Docker, SNMP, and Proxmox storage discovery are possible future additions, but
-only as child-resource or infrastructure discovery. General host collectors,
-GPU backends, remote tasks, and terminal features are explicitly out of scope.
+SNMP and Proxmox storage discovery are possible future additions, but only as
+child-resource or infrastructure discovery. General host collectors, GPU
+backends, remote tasks, and terminal features are explicitly out of scope.
 
 ## Resource identity and current merging
 
@@ -188,6 +190,53 @@ PVE exposes network byte counters rather than rates. The bridge derives current
 upload and download rates from consecutive samples while preserving the PVE
 counters as traffic totals. The first sample after a bridge restart initializes
 the rate baseline and therefore reports zero.
+
+The bridge report model also carries a `disks` extension array with mountpoint,
+filesystem, device, total, and used bytes. QGA, Linux SSH, Windows SSH, and WSL
+collectors populate it while preserving the aggregate `disk` metric. Current
+Komari releases deserialize reports into a fixed protocol structure and discard
+this unknown extension field, so an upstream Server protocol change is still
+required before themes can receive the per-mount data.
+
+## Docker discovery
+
+The Docker provider uses the Engine API and emits container-level child
+resources. Standalone containers, Docker Compose containers, and local Docker
+Swarm tasks are distinguished by Docker's standard labels. Identities are based
+on the standalone container name, Compose project/service/replica number, or
+Swarm service/slot, so normal recreation does not register a new Komari client.
+
+```yaml
+providers:
+  docker:
+    - id: nas-a-docker
+      endpoint: unix:///var/run/docker.sock
+      group: Lab A
+      include_all: false
+      attach_to:
+        source_type: proxmox
+        source_id: site-a
+        external_id: qemu:100
+```
+
+By default, only containers carrying `komari.bridge.monitor=true` are registered;
+set `include_all: true` only on engines where every workload is intentionally in
+scope. Running workloads report normalized CPU, working-set memory, PID count,
+network rates, and traffic totals. `include_stopped: true` additionally
+inventories selected stopped containers without keeping them online. Compose
+has no separate Engine object, so project/service membership comes from Compose
+labels. A Swarm engine reports tasks running on that engine; deploy a provider
+on each Swarm node for node-complete task metrics. Cluster-wide service/task
+inventory requires a future extension-resource API instead of fabricated host
+metrics.
+
+Docker's stats API does not expose filesystem capacity or per-volume free
+space, so the provider does not invent a container disk percentage. Container
+mount definitions and host-volume capacity need a separate storage extension.
+
+`unix:///var/run/docker.sock` access is effectively root-equivalent. Remote
+engines should use `https://` with a CA and client certificate. Plain `tcp://`
+or `http://` is rejected unless `insecure_allow_http: true` is explicitly set.
 
 ## Agentless SSH fallback
 

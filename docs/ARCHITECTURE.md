@@ -13,6 +13,7 @@ and relationships for resources that cannot be represented by one Agent.
 | Host CPU, memory, disk, network, OS, GPU | Komari Agent |
 | Terminal, tasks, ping, pull, updates | Komari Agent |
 | Proxmox nodes, QEMU guests, and LXC discovery | Bridge |
+| Selected Docker, Compose, and Swarm child workloads | Bridge |
 | Windows-to-WSL discovery | Bridge |
 | Slurm scheduler state | Bridge extension |
 | Host metrics when Agent cannot run | Optional `agentless_ssh` fallback |
@@ -27,8 +28,9 @@ A new provider should satisfy at least one of these conditions:
 3. It supplies domain metrics outside the generic host model.
 
 A provider should not be added merely to collect another OS's generic host or
-GPU metrics remotely. Docker and SNMP, if added, should be discovery-oriented;
-short-lived containers should not become Komari clients by default.
+GPU metrics remotely. Docker and SNMP should be discovery-oriented;
+short-lived containers do not become Komari clients unless explicitly labeled
+or `include_all` is enabled for that engine.
 
 ## Current compatibility limitation
 
@@ -42,6 +44,10 @@ Komari's existing `group` and `tags` fields as a compatibility transport. This
 allows topology-aware themes to group PVE guests and WSL children, but it does
 not create server-side resource objects, enforce relationship integrity, or
 provide Agent identity binding.
+
+The bridge can send a `disks` mountpoint extension, but current Komari Server
+report structs discard it. Per-mount UI therefore remains gated on an upstream
+protocol, runtime-state, and public-API change.
 
 Until the server exposes topology and extension APIs, the bridge must not share
 an Agent client token or submit a second complete host report to that client.

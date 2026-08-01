@@ -157,11 +157,16 @@ type guestFilesystem struct {
 	Type       string `json:"type"`
 	TotalBytes int64  `json:"total-bytes"`
 	UsedBytes  int64  `json:"used-bytes"`
+	Disks      []struct {
+		Device string `json:"dev"`
+		Serial string `json:"serial"`
+	} `json:"disk"`
 }
 
 type guestDisk struct {
-	Total int64
-	Used  int64
+	Total  int64
+	Used   int64
+	Mounts []model.DiskMount
 }
 
 type resource struct {
@@ -386,6 +391,15 @@ func summarizeGuestFilesystems(filesystems []guestFilesystem) (guestDisk, error)
 		seen[key] = struct{}{}
 		disk.Total += filesystem.TotalBytes
 		disk.Used += filesystem.UsedBytes
+		device := ""
+		if len(filesystem.Disks) > 0 {
+			device = firstNonEmpty(filesystem.Disks[0].Device, filesystem.Disks[0].Serial)
+		}
+		disk.Mounts = append(disk.Mounts, model.DiskMount{
+			Name: filesystem.Name, Mountpoint: firstNonEmpty(filesystem.Mountpoint, filesystem.Name),
+			Filesystem: filesystem.Type, Device: device,
+			Total: filesystem.TotalBytes, Used: filesystem.UsedBytes,
+		})
 	}
 	if disk.Total <= 0 || disk.Used < 0 || disk.Used > disk.Total {
 		return guestDisk{}, fmt.Errorf("QGA filesystem response contains no usable filesystems")
@@ -435,6 +449,7 @@ func applyGuestMemory(snapshot *model.Snapshot, memory guestMemory, cached bool)
 func applyGuestDisk(snapshot *model.Snapshot, disk guestDisk, cached bool) {
 	snapshot.BasicInfo.DiskTotal = disk.Total
 	snapshot.Report.Disk = model.Usage{Total: disk.Total, Used: disk.Used}
+	snapshot.Report.Disks = append([]model.DiskMount(nil), disk.Mounts...)
 	snapshot.Report.Message = "Guest filesystem usage from the QEMU Guest Agent; remaining metrics observed by Proxmox."
 	if cached {
 		snapshot.Report.Message = "Last known guest filesystem usage from the QEMU Guest Agent; remaining metrics observed by Proxmox."

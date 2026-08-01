@@ -18,6 +18,7 @@ import (
 	"github.com/LJAYi/komari-bridge/internal/provider"
 	"github.com/LJAYi/komari-bridge/internal/slurm"
 	"github.com/LJAYi/komari-bridge/internal/store"
+	"github.com/LJAYi/komari-bridge/providers/docker"
 	"github.com/LJAYi/komari-bridge/providers/linuxssh"
 	"github.com/LJAYi/komari-bridge/providers/proxmox"
 	"github.com/LJAYi/komari-bridge/providers/windowsssh"
@@ -86,11 +87,18 @@ func main() {
 }
 
 func buildProviders(cfg config.Config, slurmStore *slurm.Store) ([]provider.Provider, error) {
-	providerCount := len(cfg.Providers.Proxmox) + len(cfg.Providers.AgentlessSSH) + len(cfg.Providers.Slurm) +
+	providerCount := len(cfg.Providers.Proxmox) + len(cfg.Providers.Docker) + len(cfg.Providers.AgentlessSSH) + len(cfg.Providers.Slurm) +
 		len(cfg.Providers.WindowsWSL) + len(cfg.Providers.LinuxSSH) + len(cfg.Providers.WindowsSSH)
 	providers := make([]provider.Provider, 0, providerCount)
 	for _, pveCfg := range cfg.Providers.Proxmox {
 		p, err := proxmox.New(pveCfg, cfg.Komari.Timeout.Duration)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	for _, dockerCfg := range cfg.Providers.Docker {
+		p, err := docker.New(dockerCfg, cfg.Komari.Timeout.Duration)
 		if err != nil {
 			return nil, err
 		}
