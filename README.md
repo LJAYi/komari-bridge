@@ -175,10 +175,19 @@ transient failure reuses the last valid guest sample for up to 60 seconds;
 before the first valid sample or after that grace period, host reporting stops
 until QGA recovers.
 
-PVE also cannot observe filesystem usage inside a QEMU guest. The bridge leaves
-QEMU disk totals and usage unavailable instead of presenting allocated virtual
-disk capacity as a misleading 0% filesystem gauge. An attached guest-side
-collector supplies both values when one is configured.
+PVE's cluster resource list cannot observe filesystem usage inside a QEMU
+guest. When QGA is available, the bridge automatically reads `get-fsinfo`,
+deduplicates mounted filesystems, excludes pseudo and read-only image
+filesystems, and reports the guest-visible total and used bytes. A transient
+failure reuses the last valid filesystem sample for up to 60 seconds. Without
+QGA or an attached guest-side collector, QEMU disk totals and usage remain
+unavailable instead of presenting allocated virtual-disk capacity as a
+misleading 0% filesystem gauge.
+
+PVE exposes network byte counters rather than rates. The bridge derives current
+upload and download rates from consecutive samples while preserving the PVE
+counters as traffic totals. The first sample after a bridge restart initializes
+the rate baseline and therefore reports zero.
 
 ## Agentless SSH fallback
 

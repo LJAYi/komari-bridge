@@ -31,12 +31,25 @@ type Provider struct {
 	nodeStatus  map[string]nodeStatusEnrichment
 	guestOS     map[string]guestOSEnrichment
 	guestMemory map[string]cachedGuestMemory
+	guestDisk   map[string]cachedGuestDisk
+	network     map[string]networkSample
 }
 
-const guestMemoryGracePeriod = time.Minute
+const guestEnrichmentGracePeriod = time.Minute
 
 type cachedGuestMemory struct {
 	memory  guestMemory
+	savedAt time.Time
+}
+
+type cachedGuestDisk struct {
+	disk    guestDisk
+	savedAt time.Time
+}
+
+type networkSample struct {
+	up      int64
+	down    int64
 	savedAt time.Time
 }
 
@@ -70,6 +83,8 @@ func New(cfg config.ProxmoxConfig, timeout time.Duration) (*Provider, error) {
 		nodeStatus:  make(map[string]nodeStatusEnrichment),
 		guestOS:     make(map[string]guestOSEnrichment),
 		guestMemory: make(map[string]cachedGuestMemory),
+		guestDisk:   make(map[string]cachedGuestDisk),
+		network:     make(map[string]networkSample),
 	}, nil
 }
 
@@ -128,6 +143,25 @@ type guestMemory struct {
 	MemoryAvailable int64
 	SwapTotal       int64
 	SwapFree        int64
+}
+
+type guestFilesystemResponse struct {
+	Data struct {
+		Result []guestFilesystem `json:"result"`
+	} `json:"data"`
+}
+
+type guestFilesystem struct {
+	Name       string `json:"name"`
+	Mountpoint string `json:"mountpoint"`
+	Type       string `json:"type"`
+	TotalBytes int64  `json:"total-bytes"`
+	UsedBytes  int64  `json:"used-bytes"`
+}
+
+type guestDisk struct {
+	Total int64
+	Used  int64
 }
 
 type resource struct {
@@ -200,6 +234,22 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 				applyGuestOS(&snapshot, enrichment)
 			} else if enrichment, ok := p.loadGuestOS(snapshot.Identity.ExternalID); ok {
 				applyGuestOS(&snapshot, enrichment)
+			}
+
+			var filesystems guestFilesystemResponse
+			fsPath := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/get-fsinfo", url.PathEscape(item.Node), item.VMID)
+			if err := p.getJSON(ctx, fsPath, &filesystems); err == nil {
+				if disk, err := summarizeGuestFilesystems(filesystems.Data.Result); err == nil {
+					p.storeGuestDisk(snapshot.Identity.ExternalID, disk)
+					applyGuestDisk(&snapshot, disk, false)
+					snapshot.Tags["disk_source"] = "qga_get_fsinfo"
+				} else if disk, ok := p.loadGuestDisk(snapshot.Identity.ExternalID); ok {
+					applyGuestDisk(&snapshot, disk, true)
+					snapshot.Tags["disk_source"] = "qga_get_fsinfo_cached"
+				}
+			} else if disk, ok := p.loadGuestDisk(snapshot.Identity.ExternalID); ok {
+				applyGuestDisk(&snapshot, disk, true)
+				snapshot.Tags["disk_source"] = "qga_get_fsinfo_cached"
 			}
 		}
 		if override, ok := p.resources[snapshot.Identity.ExternalID]; ok {
@@ -315,6 +365,34 @@ func usedMemory(total, available int64) int64 {
 	return total - available
 }
 
+func summarizeGuestFilesystems(filesystems []guestFilesystem) (guestDisk, error) {
+	seen := make(map[string]struct{})
+	var disk guestDisk
+	for _, filesystem := range filesystems {
+		if filesystem.TotalBytes <= 0 || filesystem.UsedBytes < 0 || filesystem.UsedBytes > filesystem.TotalBytes {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(filesystem.Type)) {
+		case "squashfs", "iso9660", "udf", "tmpfs", "devtmpfs":
+			continue
+		}
+		key := firstNonEmpty(strings.TrimSpace(filesystem.Name), strings.TrimSpace(filesystem.Mountpoint))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		disk.Total += filesystem.TotalBytes
+		disk.Used += filesystem.UsedBytes
+	}
+	if disk.Total <= 0 || disk.Used < 0 || disk.Used > disk.Total {
+		return guestDisk{}, fmt.Errorf("QGA filesystem response contains no usable filesystems")
+	}
+	return disk, nil
+}
+
 func applyNodeStatus(snapshot *model.Snapshot, enrichment nodeStatusEnrichment) {
 	snapshot.BasicInfo.CPUName = enrichment.CPUName
 	snapshot.BasicInfo.CPUCores = enrichment.CPUCores
@@ -354,6 +432,15 @@ func applyGuestMemory(snapshot *model.Snapshot, memory guestMemory, cached bool)
 	}
 }
 
+func applyGuestDisk(snapshot *model.Snapshot, disk guestDisk, cached bool) {
+	snapshot.BasicInfo.DiskTotal = disk.Total
+	snapshot.Report.Disk = model.Usage{Total: disk.Total, Used: disk.Used}
+	snapshot.Report.Message = "Guest filesystem usage from the QEMU Guest Agent; remaining metrics observed by Proxmox."
+	if cached {
+		snapshot.Report.Message = "Last known guest filesystem usage from the QEMU Guest Agent; remaining metrics observed by Proxmox."
+	}
+}
+
 func (p *Provider) storeNodeStatus(key string, enrichment nodeStatusEnrichment) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -390,10 +477,41 @@ func (p *Provider) loadGuestMemory(key string) (guestMemory, bool) {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
 	cached, ok := p.guestMemory[key]
-	if !ok || time.Since(cached.savedAt) > guestMemoryGracePeriod {
+	if !ok || time.Since(cached.savedAt) > guestEnrichmentGracePeriod {
 		return guestMemory{}, false
 	}
 	return cached.memory, true
+}
+
+func (p *Provider) storeGuestDisk(key string, disk guestDisk) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.guestDisk[key] = cachedGuestDisk{disk: disk, savedAt: time.Now()}
+}
+
+func (p *Provider) loadGuestDisk(key string) (guestDisk, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	cached, ok := p.guestDisk[key]
+	if !ok || time.Since(cached.savedAt) > guestEnrichmentGracePeriod {
+		return guestDisk{}, false
+	}
+	return cached.disk, true
+}
+
+func (p *Provider) networkRates(key string, up, down int64, now time.Time) (int64, int64) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	previous, ok := p.network[key]
+	p.network[key] = networkSample{up: up, down: down, savedAt: now}
+	if !ok || up < previous.up || down < previous.down {
+		return 0, 0
+	}
+	elapsed := now.Sub(previous.savedAt).Seconds()
+	if elapsed <= 0 {
+		return 0, 0
+	}
+	return int64(float64(up-previous.up) / elapsed), int64(float64(down-previous.down) / elapsed)
 }
 
 func cpuDisplayName(model string, sockets int) string {
@@ -472,6 +590,7 @@ func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
 		// unavailable until a guest-side authority enriches the snapshot.
 		diskTotal, diskUsed = 0, 0
 	}
+	netUp, netDown := p.networkRates(externalID, item.NetOut, item.NetIn, now)
 	return model.Snapshot{
 		Identity:         model.Identity{SourceType: p.SourceType(), SourceID: p.id, ExternalID: externalID},
 		ParentExternalID: parentID,
@@ -490,7 +609,7 @@ func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
 			CPU:     model.CPUReport{Cores: maxCPU, Usage: item.CPU * 100},
 			RAM:     model.Usage{Total: item.MaxMem, Used: item.Mem},
 			Disk:    model.Usage{Total: diskTotal, Used: diskUsed},
-			Network: model.NetworkReport{TotalUp: item.NetOut, TotalDown: item.NetIn},
+			Network: model.NetworkReport{Up: netUp, Down: netDown, TotalUp: item.NetOut, TotalDown: item.NetIn},
 			Uptime:  item.Uptime,
 			Message: "Metrics observed by Proxmox; guest filesystem and process metrics are unavailable.",
 		},

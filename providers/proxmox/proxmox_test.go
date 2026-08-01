@@ -33,6 +33,11 @@ func TestCollect(t *testing.T) {
 			w.Write([]byte(`{"data":{"cpuinfo":{"model":"Example 32-Core Processor","cpus":128,"cores":64,"sockets":2,"mhz":"3791.478"},"pveversion":"pve-manager/9.2.2","kversion":"Linux 7.0.2-6-pve"}}`))
 		case "/api2/json/nodes/pve-a/qemu/105/agent/get-osinfo":
 			w.Write([]byte(`{"data":{"result":{"name":"Ubuntu","pretty-name":"Ubuntu 24.04.4 LTS","machine":"x86_64","kernel-release":"6.8.0"}}}`))
+		case "/api2/json/nodes/pve-a/qemu/105/agent/get-fsinfo":
+			w.Write([]byte(`{"data":{"result":[
+              {"name":"sda1","mountpoint":"/","type":"ext4","total-bytes":1000,"used-bytes":400},
+              {"name":"sdb1","mountpoint":"/data","type":"xfs","total-bytes":4000,"used-bytes":1000}
+            ]}}`))
 		case "/api2/json/nodes/pve-a/qemu/105/agent/exec":
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
@@ -79,8 +84,39 @@ func TestCollect(t *testing.T) {
 	if vm.Report.RAM.Total != 1000*1024 || vm.Report.RAM.Used != 250*1024 || vm.Report.Swap.Used != 20*1024 || vm.Tags["memory_source"] != "qga_proc_meminfo" {
 		t.Fatalf("unexpected QGA memory snapshot: %#v", vm)
 	}
-	if vm.BasicInfo.DiskTotal != 0 || vm.Report.Disk != (model.Usage{}) {
-		t.Fatalf("QEMU guest disk usage should be unavailable: %#v", vm.Report.Disk)
+	if vm.BasicInfo.DiskTotal != 5000 || vm.Report.Disk != (model.Usage{Total: 5000, Used: 1400}) || vm.Tags["disk_source"] != "qga_get_fsinfo" {
+		t.Fatalf("unexpected QGA guest disk usage: %#v", vm)
+	}
+}
+
+func TestSummarizeGuestFilesystems(t *testing.T) {
+	t.Parallel()
+	disk, err := summarizeGuestFilesystems([]guestFilesystem{
+		{Name: "sda1", Mountpoint: "/", Type: "ext4", TotalBytes: 1000, UsedBytes: 400},
+		{Name: "sda1", Mountpoint: "/bind", Type: "ext4", TotalBytes: 1000, UsedBytes: 400},
+		{Name: "loop0", Mountpoint: "/rom", Type: "squashfs", TotalBytes: 100, UsedBytes: 100},
+		{Name: "overlay", Mountpoint: "/overlay", Type: "f2fs", TotalBytes: 2000, UsedBytes: 300},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disk != (guestDisk{Total: 3000, Used: 700}) {
+		t.Fatalf("unexpected filesystem summary: %#v", disk)
+	}
+}
+
+func TestNetworkRates(t *testing.T) {
+	t.Parallel()
+	p := &Provider{network: make(map[string]networkSample)}
+	started := time.Unix(100, 0)
+	if up, down := p.networkRates("qemu:100", 1000, 2000, started); up != 0 || down != 0 {
+		t.Fatalf("first sample rates = %d/%d, want 0/0", up, down)
+	}
+	if up, down := p.networkRates("qemu:100", 3000, 5000, started.Add(20*time.Second)); up != 100 || down != 150 {
+		t.Fatalf("second sample rates = %d/%d, want 100/150", up, down)
+	}
+	if up, down := p.networkRates("qemu:100", 10, 20, started.Add(40*time.Second)); up != 0 || down != 0 {
+		t.Fatalf("reset sample rates = %d/%d, want 0/0", up, down)
 	}
 }
 
@@ -241,7 +277,7 @@ func TestQGAMemoryTransientFailureUsesLastKnownGood(t *testing.T) {
 	}
 	p.cacheMu.Lock()
 	cached := p.guestMemory["qemu:105"]
-	cached.savedAt = time.Now().Add(-guestMemoryGracePeriod - time.Second)
+	cached.savedAt = time.Now().Add(-guestEnrichmentGracePeriod - time.Second)
 	p.guestMemory["qemu:105"] = cached
 	p.cacheMu.Unlock()
 	third := collectSingleSnapshot(t, p)
