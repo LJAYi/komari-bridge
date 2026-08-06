@@ -24,6 +24,7 @@ type Provider struct {
 	secret      string
 	group       string
 	skipStopped bool
+	excluded    map[string]struct{}
 	names       map[string]string
 	resources   map[string]config.ResourceOverride
 	http        *http.Client
@@ -76,9 +77,16 @@ func New(cfg config.ProxmoxConfig, timeout time.Duration) (*Provider, error) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec // Explicit per-source option for private PVE certificates.
+	excluded := make(map[string]struct{}, len(cfg.ExcludeResources))
+	for _, externalID := range cfg.ExcludeResources {
+		externalID = strings.TrimSpace(externalID)
+		if externalID != "" {
+			excluded[externalID] = struct{}{}
+		}
+	}
 	return &Provider{
 		id: cfg.ID, endpoint: u.String(), tokenID: cfg.TokenID, secret: cfg.TokenSecret,
-		group: cfg.Group, skipStopped: cfg.SkipStopped, names: cfg.Names, resources: cfg.Resources,
+		group: cfg.Group, skipStopped: cfg.SkipStopped, excluded: excluded, names: cfg.Names, resources: cfg.Resources,
 		http:        &http.Client{Timeout: timeout, Transport: transport},
 		nodeStatus:  make(map[string]nodeStatusEnrichment),
 		guestOS:     make(map[string]guestOSEnrichment),
@@ -198,6 +206,9 @@ func (p *Provider) Collect(ctx context.Context) ([]model.Snapshot, error) {
 	snapshots := make([]model.Snapshot, 0, len(payload.Data))
 	for _, item := range payload.Data {
 		if item.Template != 0 || (item.Type != "node" && item.Type != "qemu" && item.Type != "lxc") {
+			continue
+		}
+		if _, excluded := p.excluded[externalID(item)]; excluded {
 			continue
 		}
 		if p.skipStopped && item.Status != "online" && item.Status != "running" {
@@ -575,7 +586,7 @@ func (p *Provider) doJSON(req *http.Request, dst any) error {
 }
 
 func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
-	externalID := item.Type + ":" + strconv.Itoa(item.VMID)
+	externalID := externalID(item)
 	parentID := "node:" + item.Node
 	name := item.Name
 	osName := "Proxmox " + strings.ToUpper(item.Type) + " guest (external metrics)"
@@ -632,6 +643,13 @@ func (p *Provider) snapshot(item resource, now time.Time) model.Snapshot {
 		Online:      item.Status == "online" || item.Status == "running",
 		Priority:    10,
 	}
+}
+
+func externalID(item resource) string {
+	if item.Type == "node" {
+		return "node:" + firstNonEmpty(item.Node, item.Name, strings.TrimPrefix(item.ID, "node/"))
+	}
+	return item.Type + ":" + strconv.Itoa(item.VMID)
 }
 
 func firstNonEmpty(values ...string) string {

@@ -92,6 +92,37 @@ func TestCollect(t *testing.T) {
 	}
 }
 
+func TestCollectExcludesResource(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api2/json/cluster/resources" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[
+          {"id":"node/pve-a","type":"node","node":"pve-a","status":"online"},
+          {"id":"qemu/105","type":"qemu","node":"pve-a","name":"ubuntu","vmid":105,"status":"running"}
+        ]}`))
+	}))
+	defer server.Close()
+
+	p, err := New(config.ProxmoxConfig{
+		ID: "site-a", Endpoint: server.URL, TokenID: "token", TokenSecret: "secret",
+		InsecureSkipVerify: true, ExcludeResources: []string{"node:pve-a"},
+	}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := p.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Identity.ExternalID != "qemu:105" {
+		t.Fatalf("unexpected snapshots: %#v", snapshots)
+	}
+}
+
 func TestSummarizeGuestFilesystems(t *testing.T) {
 	t.Parallel()
 	disk, err := summarizeGuestFilesystems([]guestFilesystem{

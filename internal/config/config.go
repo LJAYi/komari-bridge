@@ -89,6 +89,7 @@ type ProxmoxConfig struct {
 	Group              string                      `yaml:"group"`
 	InsecureSkipVerify bool                        `yaml:"insecure_skip_verify"`
 	SkipStopped        bool                        `yaml:"skip_stopped"`
+	ExcludeResources   []string                    `yaml:"exclude_resources"`
 	Names              map[string]string           `yaml:"names"`
 	Resources          map[string]ResourceOverride `yaml:"resources"`
 }

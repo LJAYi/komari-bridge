@@ -24,6 +24,10 @@ providers:
       group: Lab A
       insecure_skip_verify: false
       skip_stopped: true
+      # When an independently installed Komari Agent is authoritative for the
+      # PVE host, exclude only that node while retaining VM/LXC discovery.
+      exclude_resources:
+        - "node:pve-a"
       names:
         "node:pve-a": pve-a
         "qemu:100": nas-a
